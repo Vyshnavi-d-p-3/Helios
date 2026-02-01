@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/vyshnavi-d-p-3/helios/internal/config"
 	"github.com/vyshnavi-d-p-3/helios/internal/memtable"
@@ -24,6 +25,9 @@ type Engine struct {
 	mem   *memtable.Memtable
 	sst   []*sstable.Table
 	sstID int
+	// seriesCard maps metric name -> set of canonical series keys; used when
+	// MaxSeriesPerMetric > 0. Rebuilt on Open and after retention removes SSTs.
+	seriesCard map[string]map[string]struct{}
 }
 
 // Open loads configuration paths, replays the WAL, opens the WAL for appends,
@@ -51,6 +55,9 @@ func Open(cfg config.Config) (*Engine, error) {
 		_ = w.Close()
 		return nil, err
 	}
+	eng.mu.Lock()
+	eng.rebuildSeriesCardLocked()
+	eng.mu.Unlock()
 	return eng, nil
 }
 
@@ -86,11 +93,15 @@ func (e *Engine) Write(samples []storage.Sample) error {
 			return fmt.Errorf("engine: memtable soft cap would be exceeded (approx + batch estimate)")
 		}
 	}
+	if err := e.cardinalityCheckBatchLocked(samples); err != nil {
+		return err
+	}
 	if _, err := e.wal.Append(samples); err != nil {
 		return err
 	}
 	for i := range samples {
 		e.mem.Put(samples[i])
+		e.cardinalityRecordLocked(samples[i])
 	}
 	return nil
 }
@@ -182,10 +193,40 @@ func (e *Engine) NextWALSeq() uint64 {
 	return e.wal.NextSeq()
 }
 
+// RetentionPeriod returns the configured max on-disk age for SSTs (0 = no limit).
+func (e *Engine) RetentionPeriod() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return e.cfg.RetentionPeriod
+}
+
+// MaxSeriesPerMetric returns the per-metric series cardinality cap (0 = unlimited).
+func (e *Engine) MaxSeriesPerMetric() int {
+	if e == nil {
+		return 0
+	}
+	return e.cfg.MaxSeriesPerMetric
+}
+
+// RetentionGCTickInterval is the configured background GC period (0 = disabled).
+func (e *Engine) RetentionGCTickInterval() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return e.cfg.RetentionGCTickInterval
+}
+
 // Close flushes the WAL and releases resources.
 func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	for _, t := range e.sst {
+		if t != nil {
+			_ = t.Close()
+		}
+	}
+	e.sst = e.sst[:0]
 	if e.wal == nil {
 		return nil
 	}
