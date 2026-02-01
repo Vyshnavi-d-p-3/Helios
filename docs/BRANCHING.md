@@ -1,15 +1,14 @@
 # Branching model (Helios)
 
-Default branch: **`main`**. Older docs sometimes say `master`; here **`master` is a mirror of `main`** only if you want both names (CI, old scripts). Prefer one primary name to avoid drift.
+Default branch: **`main`**. Use that name everywhere (CI, GitHub, scripts).
 
 | Branch        | Role |
 |---------------|------|
-| **`main`**    | Protected, release-quality. Merges from `develop` after review, or hotfix flows. |
-| **`develop`** | Day-to-day integration. Feature branches merge here first. |
-| **`production`** | Optional: exactly what you deploy to prod, or tag-based deploys from `main`. Some teams skip this and deploy from `main` + tags. |
-| **`feature/<name>`** | Short-lived work (e.g. `feature/wal-framing`). Branch from `develop`, open PR back to `develop`. |
+| **`main`**    | Default branch; protected, release-quality. Merges from `develop` (or `hotfix/*` in emergencies) after review. |
+| **`develop`** | Integration target for daily work. `feature/*` and `fix/*` merge here first. |
+| **`production`** | Deploy line: what you run in prod. Merge `main → production` when you cut a release (or keep it equal to `main` in small projects). |
+| **`feature/<name>`** | Short-lived work (e.g. `feature/remote-read-hints`). Branch from `develop`, PR back to `develop`. |
 | **`fix/<issue>`** | Small bugfixes, same flow as features. |
-
 Release tags (`v0.1.0`) on `main` are the durable record of what shipped, not fake commit dates.
 
 ## Human-led, AI-assisted workflow
@@ -24,6 +23,19 @@ Release tags (`v0.1.0`) on `main` are the durable record of what shipped, not fa
 Use your **real** author time for work you did when you did it. Rewriting history with artificial `GIT_AUTHOR_DATE` ranges to simulate months of activity is easy to detect and erodes trust if a reviewer runs `git log --format=fuller` or checks against your story. For a portfolio, a believable narrative is: steady small commits, good messages, and branches/PRs — not a backdated graph.
 
 If you truly did work in Jan–Mar 2026, those commits should already carry those dates on the machine where you committed; do not bulk-rewrite unless you are fixing a one-off misconfiguration and you are transparent about it.
+
+## Keep long-lived branches aligned (local)
+
+```bash
+# After a release merge to main, bring develop and production up to main if you want the same tip:
+git fetch origin
+git checkout main && git pull
+git branch -f develop main
+git branch -f production main
+git push -u origin develop
+git push -u origin main
+git push -u origin production
+```
 
 ## Quick commands
 
