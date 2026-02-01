@@ -18,6 +18,20 @@ Release tags (`v0.1.0`) on `main` are the durable record of what shipped, not fa
 - **The message must match the diff.** If a commit only edits `docs/`, do not say you changed the WAL; if you only wire one flag, the subject should say that.
 - **A merge should combine two lines of work that differ.** If you would merge with **no file change** and no real integration story, use **fast-forward** instead of `--no-ff`. Reserve merge commits for when feature branches (or `develop` vs `main`) actually add commits on one side.
 - **Tools / editors:** Some IDEs append a `Made-with: …` line to every commit. Turn that off in settings if you can; it makes messages look templated. Optional footers like `Co-authored-by:` are fine when they are true.
+- If your editor still injects footer lines, use `scripts/commit-clean.sh` after staging to create a clean commit message from the terminal.
+
+### Clean commit helper (when editor mutates messages)
+
+```bash
+# stage your changes first
+git add <files>
+
+# subject only
+scripts/commit-clean.sh "Fix WAL replay EOF handling"
+
+# subject + body
+scripts/commit-clean.sh "Tighten query window validation" "Reject negative windows and cover with tests."
+```
 
 ## Why merge commits (not only fast-forwards)
 
