@@ -43,6 +43,11 @@ type Config struct {
 	// 0 disables retention (all data kept indefinitely).
 	RetentionPeriod time.Duration
 
+	// RetentionGCTickInterval is how often EnforceRetention runs in the server
+	// process. 0 disables background GC (use POST /api/v1/retention only).
+	// Ignored when RetentionPeriod is 0.
+	RetentionGCTickInterval time.Duration
+
 	// Cardinality cap: per-metric series limit. Writes to a metric that
 	// would exceed this are rejected with a clear error. 0 = unlimited
 	// (NOT recommended in production — this is the single most common
@@ -72,8 +77,9 @@ func DefaultConfig() Config {
 		WALSyncInterval:       10 * time.Millisecond,
 		L0CompactionThreshold: 4,
 		MaxLevels:             4,
-		RetentionPeriod:       30 * 24 * time.Hour, // 30 days
-		MaxSeriesPerMetric:    100_000,
+		RetentionPeriod:         30 * 24 * time.Hour, // 30 days
+		RetentionGCTickInterval: 1 * time.Hour,
+		MaxSeriesPerMetric:      100_000,
 		AnomalyAlpha:          0.3,
 		AnomalyThreshold:      3.0,
 		AnomalyWarmup:         10,
@@ -114,6 +120,7 @@ func ParseArgs(fs *flag.FlagSet, args []string) (Config, error) {
 	fs.IntVar(&cfg.L0CompactionThreshold, "l0-compaction-threshold", cfg.L0CompactionThreshold, "L0 SSTable count trigger")
 	fs.IntVar(&cfg.MaxLevels, "max-levels", cfg.MaxLevels, "Maximum SSTable levels")
 	fs.DurationVar(&cfg.RetentionPeriod, "retention-period", cfg.RetentionPeriod, "Drop data older than this; 0 = unlimited")
+	fs.DurationVar(&cfg.RetentionGCTickInterval, "retention-gc-interval", cfg.RetentionGCTickInterval, "Background SST retention GC period; 0 = off")
 	fs.IntVar(&cfg.MaxSeriesPerMetric, "max-series-per-metric", cfg.MaxSeriesPerMetric, "Per-metric cardinality cap")
 	fs.Float64Var(&cfg.AnomalyAlpha, "anomaly-alpha", cfg.AnomalyAlpha, "EWMA smoothing factor (0,1)")
 	fs.Float64Var(&cfg.AnomalyThreshold, "anomaly-threshold", cfg.AnomalyThreshold, "Anomaly z-score threshold")
@@ -162,6 +169,11 @@ func (c *Config) applyEnv() {
 	if v, ok := os.LookupEnv("HELIOS_BOOTSTRAP"); ok {
 		c.Bootstrap = v == "true" || v == "1"
 	}
+	getEnv("HELIOS_RETENTION_GC_INTERVAL", func(v string) {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.RetentionGCTickInterval = d
+		}
+	})
 }
 
 func splitCSV(s string) []string {
