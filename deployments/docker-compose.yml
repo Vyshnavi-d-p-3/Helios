@@ -1,0 +1,110 @@
+version: "3.8"
+
+# v2 fixes over v1:
+#   1. Bootstrap is now done with the FULL voter set up front (not just self),
+#      eliminating the race where helios-2/3 had no way to join.
+#   2. All three nodes start simultaneously; helios-1 waits in BootstrapCluster()
+#      until it can see helios-2 and helios-3 (handled by hashicorp/raft's
+#      transport retry).
+#   3. Healthcheck uses /livez (process is up) not /api/v1/status (Raft is healthy)
+#      to avoid the chicken-and-egg of "node is healthy iff cluster is healthy iff
+#      all nodes are healthy."
+#   4. Persistent volumes for Raft logs are now separate from data so they can be
+#      reset independently (re-bootstrapping a cluster requires wiping Raft state
+#      but keeping data is sometimes desirable in tests).
+
+services:
+  helios-1:
+    build: { context: .., dockerfile: Dockerfile }
+    container_name: helios-1
+    environment:
+      HELIOS_NODE_ID: "helios-1"
+      HELIOS_HTTP_ADDR: ":8080"
+      HELIOS_GRPC_ADDR: ":9090"
+      HELIOS_RAFT_ADDR: "helios-1:7000"
+      HELIOS_PEERS: "helios-1=helios-1:7000,helios-2=helios-2:7000,helios-3=helios-3:7000"
+      HELIOS_BOOTSTRAP: "true"
+      HELIOS_DATA_DIR: "/helios/data"
+      HELIOS_RAFT_DIR: "/helios/raft"
+      HELIOS_LOG_LEVEL: "info"
+    ports: ["8080:8080", "9090:9090"]
+    volumes:
+      - helios-1-data:/helios/data
+      - helios-1-raft:/helios/raft
+    networks: [helios-net]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  helios-2:
+    build: { context: .., dockerfile: Dockerfile }
+    container_name: helios-2
+    environment:
+      HELIOS_NODE_ID: "helios-2"
+      HELIOS_HTTP_ADDR: ":8080"
+      HELIOS_GRPC_ADDR: ":9090"
+      HELIOS_RAFT_ADDR: "helios-2:7000"
+      HELIOS_PEERS: "helios-1=helios-1:7000,helios-2=helios-2:7000,helios-3=helios-3:7000"
+      HELIOS_BOOTSTRAP: "false"
+      HELIOS_DATA_DIR: "/helios/data"
+      HELIOS_RAFT_DIR: "/helios/raft"
+      HELIOS_LOG_LEVEL: "info"
+    ports: ["8081:8080", "9091:9090"]
+    volumes:
+      - helios-2-data:/helios/data
+      - helios-2-raft:/helios/raft
+    networks: [helios-net]
+
+  helios-3:
+    build: { context: .., dockerfile: Dockerfile }
+    container_name: helios-3
+    environment:
+      HELIOS_NODE_ID: "helios-3"
+      HELIOS_HTTP_ADDR: ":8080"
+      HELIOS_GRPC_ADDR: ":9090"
+      HELIOS_RAFT_ADDR: "helios-3:7000"
+      HELIOS_PEERS: "helios-1=helios-1:7000,helios-2=helios-2:7000,helios-3=helios-3:7000"
+      HELIOS_BOOTSTRAP: "false"
+      HELIOS_DATA_DIR: "/helios/data"
+      HELIOS_RAFT_DIR: "/helios/raft"
+      HELIOS_LOG_LEVEL: "info"
+    ports: ["8082:8080", "9092:9090"]
+    volumes:
+      - helios-3-data:/helios/data
+      - helios-3-raft:/helios/raft
+    networks: [helios-net]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: helios-prometheus
+    ports: ["9093:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks: [helios-net]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: helios-grafana
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "helios"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks: [helios-net]
+
+volumes:
+  helios-1-data:
+  helios-1-raft:
+  helios-2-data:
+  helios-2-raft:
+  helios-3-data:
+  helios-3-raft:
+  grafana-data:
+
+networks:
+  helios-net:
+    driver: bridge
