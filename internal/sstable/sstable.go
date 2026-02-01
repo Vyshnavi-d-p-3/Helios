@@ -1,5 +1,6 @@
-// Package sstable is a v1 on-disk table: sorted series keys, JSON metadata
-// (metric+labels) per series, and Gorilla-compressed (ts, value) blocks.
+// Package sstable is an on-disk table: sorted series keys, JSON metadata
+// (metric+labels) per series, Gorilla-compressed (ts, value) blocks, and
+// (format v2) postings and label-value indexes before a fixed trailer.
 package sstable
 
 import (
@@ -16,14 +17,15 @@ import (
 	"github.com/vyshnavi-d-p-3/helios/pkg/gorilla"
 )
 
-var fileMagic = []byte{'H', 'S', 'S', 'T', 1, 0, 0, 0}
+var fileMagicV1 = []byte{'H', 'S', 'S', 'T', 1, 0, 0, 0}
 
 type seriesMeta struct {
 	Metric string            `json:"m"`
 	Labels map[string]string `json:"l,omitempty"`
 }
 
-// WriteFromMemtable writes a memtable to path (key order: series, then time).
+// WriteFromMemtable writes a memtable to path (key order: series, then time)
+// using format v2: data blocks, postings, label values, and a v2 trailer.
 // An empty memtable is an error.
 func WriteFromMemtable(path string, m *memtable.Memtable) error {
 	if m.Len() == 0 {
@@ -41,7 +43,7 @@ func WriteFromMemtable(path string, m *memtable.Memtable) error {
 		return err
 	}
 	defer f.Close()
-	if _, err := f.Write(fileMagic); err != nil {
+	if _, err := f.Write(fileMagicV2); err != nil {
 		return err
 	}
 	if err := writeI64(f, minT); err != nil {
@@ -57,6 +59,24 @@ func WriteFromMemtable(path string, m *memtable.Memtable) error {
 		if err := writeSeriesBlock(f, g); err != nil {
 			return err
 		}
+	}
+	postingsOff, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	pm, lv := buildPostingsAndLabelValues(groups)
+	if err := writeV2Postings(f, pm); err != nil {
+		return err
+	}
+	lvOff, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	if err := writeV2LabelValues(f, lv); err != nil {
+		return err
+	}
+	if err := writeV2Trailer(f, postingsOff, lvOff); err != nil {
+		return err
 	}
 	return f.Sync()
 }
@@ -171,20 +191,78 @@ func readU32(f io.Reader) (uint32, error) {
 	return binary.LittleEndian.Uint32(b[:]), nil
 }
 
-// Table is a read-only SST with an in-memory series key index.
+// Table is a read-only SST with an in-memory series key index. Format v2 also
+// loads postings and label-value metadata for set-style queries.
 type Table struct {
-	path   string
-	series []string
-	off    []int64
+	path        string
+	file        *os.File // open for block reads; closed by Close
+	version     uint8
+	minT        int64
+	maxT        int64
+	series      []string
+	off         []int64
+	postings    map[string][]uint64
+	labelValues map[string][]string
 }
 
-// OpenTable opens a file and builds a series name index.
+// Version is the on-disk table format (1 = blocks only, 2 = postings + label index).
+func (t *Table) Version() int { return int(t.version) }
+
+// PostingList returns a copy of series IDs for a postings key "name=value", or nil.
+func (t *Table) PostingList(key string) []uint64 {
+	if t == nil || t.postings == nil {
+		return nil
+	}
+	ids := t.postings[key]
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]uint64, len(ids))
+	copy(out, ids)
+	return out
+}
+
+// LabelValues returns a copy of distinct values for a label name, or nil.
+func (t *Table) LabelValues(name string) []string {
+	if t == nil || t.labelValues == nil {
+		return nil
+	}
+	vs := t.labelValues[name]
+	if len(vs) == 0 {
+		return nil
+	}
+	out := make([]string, len(vs))
+	copy(out, vs)
+	return out
+}
+
+// AllLabelNames returns sorted distinct label names from the on-disk v2
+// label-value index, or nil for v1 tables.
+func (t *Table) AllLabelNames() []string {
+	if t == nil || t.labelValues == nil {
+		return nil
+	}
+	out := make([]string, 0, len(t.labelValues))
+	for n := range t.labelValues {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// OpenTable opens a file and builds a series name index. v1 tables (no trailer)
+// and v2 tables (with postings and a trailer) are both supported.
 func OpenTable(path string) (*Table, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	closeOnErr := true
+	defer func() {
+		if closeOnErr {
+			_ = f.Close()
+		}
+	}()
 	st, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -196,13 +274,25 @@ func OpenTable(path string) (*Table, error) {
 	if _, err := io.ReadFull(f, m); err != nil {
 		return nil, err
 	}
-	if string(m) != string(fileMagic) {
+	if m[0] != 'H' || m[1] != 'S' || m[2] != 'S' || m[3] != 'T' {
 		return nil, errors.New("sstable: bad magic")
 	}
-	if _, err := readI64(f); err != nil { // minT
+	ver := m[4]
+	if ver != 1 && ver != 2 {
+		return nil, errors.New("sstable: unknown format version")
+	}
+	if ver == 1 && string(m) != string(fileMagicV1) {
+		return nil, errors.New("sstable: bad v1 header")
+	}
+	if ver == 2 && string(m) != string(fileMagicV2) {
+		return nil, errors.New("sstable: bad v2 header")
+	}
+	minT, err := readI64(f)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := readI64(f); err != nil { // maxT
+	maxT, err := readI64(f)
+	if err != nil {
 		return nil, err
 	}
 	n, err := readU32(f)
@@ -243,11 +333,68 @@ func OpenTable(path string) (*Table, error) {
 		offsets = append(offsets, pos)
 		_ = i
 	}
-	return &Table{path: path, series: series, off: offsets}, nil
+	t := &Table{path: path, file: f, version: ver, minT: minT, maxT: maxT, series: series, off: offsets}
+	if ver == 1 {
+		closeOnErr = false
+		return t, nil
+	}
+	dataEnd, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, err
+	}
+	// v2: trailer is last 16 bytes; must match end of data blocks
+	pOff, lvOff, err := readV2Trailer(f)
+	if err != nil {
+		return nil, err
+	}
+	if dataEnd != pOff {
+		return nil, errors.New("sstable: v2 data/postings offset mismatch")
+	}
+	if lvOff+int64(v2trailerSize) > st.Size() {
+		return nil, errors.New("sstable: v2 file layout")
+	}
+	pr := io.NewSectionReader(f, pOff, lvOff-pOff)
+	pm, err := readV2Postings(pr)
+	if err != nil {
+		return nil, err
+	}
+	t.postings = pm
+	lr := io.NewSectionReader(f, lvOff, st.Size()-int64(v2trailerSize)-lvOff)
+	lvm, err := readV2LabelValues(lr)
+	if err != nil {
+		return nil, err
+	}
+	t.labelValues = lvm
+	closeOnErr = false
+	return t, nil
+}
+
+// Close releases the open file. Safe to call more than once.
+func (t *Table) Close() error {
+	if t == nil || t.file == nil {
+		return nil
+	}
+	err := t.file.Close()
+	t.file = nil
+	return err
 }
 
 // Path returns the backing path.
 func (t *Table) Path() string { return t.path }
+
+// MinTime and MaxTime are the min/max sample timestamps in this table (file header; ms).
+func (t *Table) MinTime() int64 { return t.minT }
+func (t *Table) MaxTime() int64 { return t.maxT }
+
+// AllSeries returns a copy of the sorted canonical series key strings in this table.
+func (t *Table) AllSeries() []string {
+	if t == nil {
+		return nil
+	}
+	out := make([]string, len(t.series))
+	copy(out, t.series)
+	return out
+}
 
 // QueryRange returns points for a canonical series key in [start,end] inclusive.
 func (t *Table) QueryRange(series string, start, end int64) []storage.Sample {
@@ -258,11 +405,15 @@ func (t *Table) QueryRange(series string, start, end int64) []storage.Sample {
 	if idx >= len(t.series) || t.series[idx] != series {
 		return nil
 	}
-	f, err := os.Open(t.path)
-	if err != nil {
-		return nil
+	f := t.file
+	if f == nil {
+		var err error
+		f, err = os.Open(t.path)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
 	}
-	defer f.Close()
 	if _, err := f.Seek(t.off[idx], io.SeekStart); err != nil {
 		return nil
 	}
