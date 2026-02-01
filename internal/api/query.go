@@ -30,6 +30,7 @@ func (h *Handler) registerQuery(mux *http.ServeMux) {
 }
 
 // queryInstant: GET /api/v1/query?metric=&t=<unix_ms> with optional l_<name>=<value>
+// Set partial=1 to return one sample per matching series (same semantics as query_range).
 func (h *Handler) queryInstant(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -46,10 +47,28 @@ func (h *Handler) queryInstant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	labels := parseLabelParams(r)
-	sk := storage.SeriesKey(metric, labels)
-	points := h.Eng.QueryRange(sk, ts, ts)
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
+	if parseBoolParam(r, "partial") {
+		rows := h.Eng.QueryRangeByLabelFilter(metric, labels, ts, ts)
+		var vec []vectorElem
+		for i := range rows {
+			for _, p := range rows[i].Samples {
+				vec = append(vec, vectorElem{Metric: p.Metric, Labels: p.Labels, Timestamp: p.Timestamp, Value: p.Value})
+			}
+		}
+		_ = enc.Encode(queryResponse{
+			Status: "success",
+			Data: map[string]any{
+				"resultType": "vector",
+				"result":     vec,
+			},
+		})
+		h.recordReadRequest("query_instant")
+		return
+	}
+	sk := storage.SeriesKey(metric, labels)
+	points := h.Eng.QueryRange(sk, ts, ts)
 	_ = enc.Encode(queryResponse{
 		Status: "success",
 		Data: map[string]any{
@@ -57,9 +76,12 @@ func (h *Handler) queryInstant(w http.ResponseWriter, r *http.Request) {
 			"result":     toVectorResult(metric, labels, points),
 		},
 	})
+	h.recordReadRequest("query_instant")
 }
 
-// queryRange: GET /api/v1/query_range?metric=&start=&end= with optional l_* labels
+// queryRange: GET /api/v1/query_range?metric=&start=&end= with optional l_* labels.
+// Set partial=1 to match any series whose metric and given labels match (extra
+// labels on the series are allowed); the result can contain several series.
 func (h *Handler) queryRange(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -85,17 +107,34 @@ func (h *Handler) queryRange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	labels := parseLabelParams(r)
-	sk := storage.SeriesKey(metric, labels)
-	points := h.Eng.QueryRange(sk, start, end)
+	partial := parseBoolParam(r, "partial")
 	var mat []matrixResult
-	if len(points) > 0 {
-		mat = []matrixResult{{
-			Metric: metric,
-			Labels: labels,
-			Values: toValuePairs(points),
-		}}
+	if partial {
+		rows := h.Eng.QueryRangeByLabelFilter(metric, labels, start, end)
+		mat = make([]matrixResult, 0, len(rows))
+		for i := range rows {
+			if len(rows[i].Samples) == 0 {
+				continue
+			}
+			s0 := rows[i].Samples[0]
+			mat = append(mat, matrixResult{
+				Metric: s0.Metric,
+				Labels: s0.Labels,
+				Values: toValuePairs(rows[i].Samples),
+			})
+		}
 	} else {
-		mat = []matrixResult{}
+		sk := storage.SeriesKey(metric, labels)
+		points := h.Eng.QueryRange(sk, start, end)
+		if len(points) > 0 {
+			mat = []matrixResult{{
+				Metric: metric,
+				Labels: labels,
+				Values: toValuePairs(points),
+			}}
+		} else {
+			mat = []matrixResult{}
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(queryResponse{
@@ -105,6 +144,12 @@ func (h *Handler) queryRange(w http.ResponseWriter, r *http.Request) {
 			"result":     mat,
 		},
 	})
+	h.recordReadRequest("query_range")
+}
+
+func parseBoolParam(r *http.Request, name string) bool {
+	s := strings.TrimSpace(strings.ToLower(r.Form.Get(name)))
+	return s == "1" || s == "true" || s == "yes"
 }
 
 func parseInt64Param(r *http.Request, name string) (int64, error) {

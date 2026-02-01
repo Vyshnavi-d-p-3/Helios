@@ -1,5 +1,7 @@
-// Package api exposes a minimal HTTP surface for local development. Prometheus
-// remote_write and full PromQL are follow-ups.
+// Package api exposes a minimal HTTP surface: JSON or Prometheus remote_write
+// (protobuf, optionally Snappy) on POST /api/v1/write; remote_read (SAMPLES) on
+// POST /api/v1/read; health, label names/values, series list, flush/compact, and
+// ad-hoc query routes; GET /metrics; and GET /-/healthy, GET /-/ready (operator probes).
 package api
 
 import (
@@ -8,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vyshnavi-d-p-3/helios/internal/engine"
 	"github.com/vyshnavi-d-p-3/helios/internal/storage"
 )
@@ -18,16 +21,43 @@ const maxWriteBodyBytes = 4 << 20
 type Handler struct {
 	Eng     *engine.Engine
 	Version string
+	// Set by registerMetrics; optional for tests that bypass NewServeMux.
+	ingestSamplesCommitted prometheus.Counter
+	ingestRejected         *prometheus.CounterVec
+	readRequests           *prometheus.CounterVec
+	apiRequests            *prometheus.CounterVec
 }
 
-// NewServeMux returns a mux with JSON ingest and health routes.
+func (h *Handler) recordReadRequest(kind string) {
+	if h == nil || h.readRequests == nil {
+		return
+	}
+	h.readRequests.WithLabelValues(kind).Inc()
+}
+
+func (h *Handler) recordAPIRequest(handler string) {
+	if h == nil || h.apiRequests == nil {
+		return
+	}
+	h.apiRequests.WithLabelValues(handler).Inc()
+}
+
+// NewServeMux returns a mux with write, flush, compact, health, label discovery, series, and query routes.
 func NewServeMux(h *Handler) *http.ServeMux {
 	mux := http.NewServeMux()
+	h.registerMetrics(mux)
 	mux.HandleFunc("GET /healthz", h.healthz)
+	mux.HandleFunc("GET /-/healthy", h.probeHealthy)
+	mux.HandleFunc("GET /-/ready", h.probeReady)
 	mux.HandleFunc("GET /api/v1/status", h.status)
-	mux.HandleFunc("POST /api/v1/write", h.writeJSON)
+	mux.HandleFunc("POST /api/v1/write", h.write)
+	mux.HandleFunc("POST /api/v1/read", h.read)
 	mux.HandleFunc("POST /api/v1/flush", h.flush)
+	mux.HandleFunc("POST /api/v1/compact", h.compactL0)
+	mux.HandleFunc("POST /api/v1/retention", h.retentionEnforce)
 	h.registerQuery(mux)
+	h.registerLabelRoutes(mux)
+	h.registerSeriesRoute(mux)
 	return mux
 }
 
@@ -37,7 +67,33 @@ func (h *Handler) flush(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.recordAPIRequest("flush")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) compactL0(w http.ResponseWriter, r *http.Request) {
+	_ = r
+	if err := h.Eng.CompactL0(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.recordAPIRequest("compact")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) retentionEnforce(w http.ResponseWriter, r *http.Request) {
+	_ = r
+	removed, err := h.Eng.EnforceRetention()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":  "ok",
+		"removed": removed,
+	})
+	h.recordAPIRequest("retention")
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -50,20 +106,23 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	_ = r
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":       "ok",
-		"version":      h.Version,
-		"mem_points":   h.Eng.MemLen(),
-		"sstables":     h.Eng.SSTCount(),
-		"next_wal_seq": h.Eng.NextWALSeq(),
+		"status":                   "ok",
+		"version":                  h.Version,
+		"mem_points":               h.Eng.MemLen(),
+		"sstables":                 h.Eng.SSTCount(),
+		"next_wal_seq":             h.Eng.NextWALSeq(),
+		"retention_period_ms":      h.Eng.RetentionPeriod().Milliseconds(),
+		"retention_gc_interval_ms": h.Eng.RetentionGCTickInterval().Milliseconds(),
+		"max_series_per_metric":    h.Eng.MaxSeriesPerMetric(),
 	})
 }
 
-// writeRequest is a simple JSON body until remote_write (protobuf) is added.
+// writeRequest is the JSON shape for POST /api/v1/write (Prometheus also uses protobuf; see remotewrite.go).
 type writeRequest struct {
 	Samples []storage.Sample `json:"samples"`
 }
 
-func (h *Handler) writeJSON(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) write(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	body := http.MaxBytesReader(w, r.Body, maxWriteBodyBytes+1)
 	data, err := io.ReadAll(body)
@@ -75,22 +134,31 @@ func (h *Handler) writeJSON(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	var req writeRequest
-	if err := json.Unmarshal(data, &req); err != nil {
+	samples, err := decodeWriteBody(data, r.Header.Get("Content-Type"), r.Header.Get("Content-Encoding"))
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if len(req.Samples) == 0 {
-		http.Error(w, "empty samples", http.StatusBadRequest)
-		return
-	}
-	if err := h.Eng.Write(req.Samples); err != nil {
+	if err := h.Eng.Write(samples); err != nil {
 		if strings.Contains(err.Error(), "memtable") {
+			if h.ingestRejected != nil {
+				h.ingestRejected.WithLabelValues("memtable").Inc()
+			}
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if strings.Contains(err.Error(), "max series per metric") {
+			if h.ingestRejected != nil {
+				h.ingestRejected.WithLabelValues("cardinality").Inc()
+			}
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if h.ingestSamplesCommitted != nil {
+		h.ingestSamplesCommitted.Add(float64(len(samples)))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
