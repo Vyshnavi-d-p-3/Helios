@@ -3,6 +3,7 @@ package engine
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/vyshnavi-d-p-3/helios/internal/config"
 	"github.com/vyshnavi-d-p-3/helios/internal/storage"
@@ -74,6 +75,24 @@ func TestEngine_write_reopen(t *testing.T) {
 	qr := e2.QueryRange(sk, 0, 20)
 	if len(qr) != 1 || qr[0].Value != 3.5 {
 		t.Fatalf("query %+v", qr)
+	}
+}
+
+func TestEngine_CheckQueryTimeRange(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dir
+	cfg.MaxQueryWindow = time.Hour
+	eng, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	if err := eng.CheckQueryTimeRange(0, 2*time.Hour.Milliseconds()); err == nil {
+		t.Fatal("expected error for range wider than cap")
+	}
+	if err := eng.CheckQueryTimeRange(0, 30*time.Minute.Milliseconds()); err != nil {
+		t.Fatalf("unexpected: %v", err)
 	}
 }
 

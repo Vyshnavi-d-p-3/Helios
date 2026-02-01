@@ -106,6 +106,10 @@ func (h *Handler) queryRange(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "end before start", http.StatusBadRequest)
 		return
 	}
+	if err := h.Eng.CheckQueryTimeRange(start, end); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	labels := parseLabelParams(r)
 	partial := parseBoolParam(r, "partial")
 	var mat []matrixResult

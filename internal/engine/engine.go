@@ -217,6 +217,31 @@ func (e *Engine) RetentionGCTickInterval() time.Duration {
 	return e.cfg.RetentionGCTickInterval
 }
 
+// MaxQueryWindow returns the cap on query/read time range (0 = unlimited).
+func (e *Engine) MaxQueryWindow() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return e.cfg.MaxQueryWindow
+}
+
+// CheckQueryTimeRange returns an error if [startMs,endMs] is wider than
+// the configured max query window (no-op when the cap is 0 or end < start).
+func (e *Engine) CheckQueryTimeRange(startMs, endMs int64) error {
+	if e == nil {
+		return nil
+	}
+	mw := e.cfg.MaxQueryWindow
+	if mw <= 0 || endMs < startMs {
+		return nil
+	}
+	span := endMs - startMs
+	if span > mw.Milliseconds() {
+		return fmt.Errorf("time range must be <= %s (got %s; -max-query-window)", mw, (time.Duration(span) * time.Millisecond).String())
+	}
+	return nil
+}
+
 // Close flushes the WAL and releases resources.
 func (e *Engine) Close() error {
 	e.mu.Lock()

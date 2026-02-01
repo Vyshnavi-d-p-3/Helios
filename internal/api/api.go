@@ -2,11 +2,14 @@
 // (protobuf, optionally Snappy) on POST /api/v1/write; remote_read (SAMPLES) on
 // POST /api/v1/read; health, label names/values, series list, flush/compact, and
 // ad-hoc query routes; GET /metrics; and GET /-/healthy, GET /-/ready (operator probes).
+// Exposing the API to untrusted callers requires a reverse proxy, auth, and (if
+// pprof is enabled) binding only to loopback. Prefer defaults: pprof off, bounded query windows.
 package api
 
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -64,7 +67,8 @@ func NewServeMux(h *Handler) *http.ServeMux {
 func (h *Handler) flush(w http.ResponseWriter, r *http.Request) {
 	_ = r
 	if err := h.Eng.Flush(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("api: flush: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	h.recordAPIRequest("flush")
@@ -74,7 +78,8 @@ func (h *Handler) flush(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) compactL0(w http.ResponseWriter, r *http.Request) {
 	_ = r
 	if err := h.Eng.CompactL0(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("api: compact: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	h.recordAPIRequest("compact")
@@ -85,7 +90,8 @@ func (h *Handler) retentionEnforce(w http.ResponseWriter, r *http.Request) {
 	_ = r
 	removed, err := h.Eng.EnforceRetention()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("api: retention: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -114,6 +120,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"retention_period_ms":      h.Eng.RetentionPeriod().Milliseconds(),
 		"retention_gc_interval_ms": h.Eng.RetentionGCTickInterval().Milliseconds(),
 		"max_series_per_metric":    h.Eng.MaxSeriesPerMetric(),
+		"max_query_window_ms":      h.Eng.MaxQueryWindow().Milliseconds(),
 	})
 }
 
@@ -154,7 +161,8 @@ func (h *Handler) write(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("api: write: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if h.ingestSamplesCommitted != nil {

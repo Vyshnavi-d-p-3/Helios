@@ -54,10 +54,13 @@ type Config struct {
 	// cause of TSDB OOMs).
 	MaxSeriesPerMetric int
 
-	AnomalyAlpha     float64
-	AnomalyThreshold float64
-	AnomalyWarmup    int
-	AnomalyMaxSeries int
+	// Pprof exposes /debug/pprof on the same HTTP port as the API. Default off;
+	// enable only on trusted networks or via a local reverse proxy.
+	Pprof bool
+
+	// MaxQueryWindow caps end-start (and read queries) in wall-clock time. 0
+	// disables the cap (not recommended for public endpoints).
+	MaxQueryWindow time.Duration
 
 	LogLevel string
 }
@@ -65,26 +68,24 @@ type Config struct {
 // DefaultConfig returns production-ready defaults.
 func DefaultConfig() Config {
 	return Config{
-		NodeID:                "helios-1",
-		HTTPAddr:              ":8080",
-		GRPCAddr:              ":9090",
-		RaftAddr:              ":7000",
-		ShardCount:            1, // single-shard by default; explicit opt-in to multi-shard
-		Bootstrap:             false,
-		DataDir:               "./data",
-		MemtableMaxSize:       64 * 1024 * 1024,
-		WALSyncMode:           "batch",
-		WALSyncInterval:       10 * time.Millisecond,
-		L0CompactionThreshold: 4,
-		MaxLevels:             4,
+		NodeID:                  "helios-1",
+		HTTPAddr:                ":8080",
+		GRPCAddr:                ":9090",
+		RaftAddr:                ":7000",
+		ShardCount:              1, // single-shard by default; explicit opt-in to multi-shard
+		Bootstrap:               false,
+		DataDir:                 "./data",
+		MemtableMaxSize:         64 * 1024 * 1024,
+		WALSyncMode:             "batch",
+		WALSyncInterval:         10 * time.Millisecond,
+		L0CompactionThreshold:   4,
+		MaxLevels:               4,
 		RetentionPeriod:         30 * 24 * time.Hour, // 30 days
 		RetentionGCTickInterval: 1 * time.Hour,
 		MaxSeriesPerMetric:      100_000,
-		AnomalyAlpha:          0.3,
-		AnomalyThreshold:      3.0,
-		AnomalyWarmup:         10,
-		AnomalyMaxSeries:      1_000_000,
-		LogLevel:              "info",
+		Pprof:                   false,
+		MaxQueryWindow:          90 * 24 * time.Hour,
+		LogLevel:                "info",
 	}
 }
 
@@ -122,10 +123,8 @@ func ParseArgs(fs *flag.FlagSet, args []string) (Config, error) {
 	fs.DurationVar(&cfg.RetentionPeriod, "retention-period", cfg.RetentionPeriod, "Drop data older than this; 0 = unlimited")
 	fs.DurationVar(&cfg.RetentionGCTickInterval, "retention-gc-interval", cfg.RetentionGCTickInterval, "Background SST retention GC period; 0 = off")
 	fs.IntVar(&cfg.MaxSeriesPerMetric, "max-series-per-metric", cfg.MaxSeriesPerMetric, "Per-metric cardinality cap")
-	fs.Float64Var(&cfg.AnomalyAlpha, "anomaly-alpha", cfg.AnomalyAlpha, "EWMA smoothing factor (0,1)")
-	fs.Float64Var(&cfg.AnomalyThreshold, "anomaly-threshold", cfg.AnomalyThreshold, "Anomaly z-score threshold")
-	fs.IntVar(&cfg.AnomalyWarmup, "anomaly-warmup", cfg.AnomalyWarmup, "Samples before detection activates")
-	fs.IntVar(&cfg.AnomalyMaxSeries, "anomaly-max-series", cfg.AnomalyMaxSeries, "Anomaly registry cardinality cap")
+	fs.BoolVar(&cfg.Pprof, "pprof", cfg.Pprof, "Expose /debug/pprof (disable on untrusted networks)")
+	fs.DurationVar(&cfg.MaxQueryWindow, "max-query-window", cfg.MaxQueryWindow, "Max time span for /query, /read; 0 = unlimited (risky for public services)")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: debug|info|warn|error")
 	fs.StringVar(&peersStr, "peers", strings.Join(cfg.Peers, ","), "Comma-separated Raft peers")
 
@@ -162,6 +161,15 @@ func (c *Config) applyEnv() {
 	getEnv("HELIOS_DATA_DIR", func(v string) { c.DataDir = v })
 	getEnv("HELIOS_LOG_LEVEL", func(v string) { c.LogLevel = v })
 	getEnv("HELIOS_PEERS", func(v string) { c.Peers = splitCSV(v) })
+	if v, ok := os.LookupEnv("HELIOS_PPROF"); ok {
+		v = strings.ToLower(strings.TrimSpace(v))
+		c.Pprof = v == "1" || v == "true" || v == "yes" || v == "on"
+	}
+	getEnv("HELIOS_MAX_QUERY_WINDOW", func(v string) {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.MaxQueryWindow = d
+		}
+	})
 
 	// Avoid pulling in strconv noise here — the flag pass will re-parse
 	// these from string defaults if they're flag-overridable. For env-only
@@ -201,14 +209,11 @@ func (c Config) Validate() error {
 	if c.MemtableMaxSize < 1<<20 {
 		return fmt.Errorf("memtable-max-size must be >= 1MiB, got %d", c.MemtableMaxSize)
 	}
-	if c.AnomalyAlpha <= 0 || c.AnomalyAlpha >= 1 {
-		return fmt.Errorf("anomaly-alpha must be in (0,1), got %f", c.AnomalyAlpha)
-	}
-	if c.AnomalyThreshold <= 0 {
-		return fmt.Errorf("anomaly-threshold must be > 0, got %f", c.AnomalyThreshold)
-	}
 	if c.WALSyncMode != "immediate" && c.WALSyncMode != "batch" {
 		return fmt.Errorf("wal-sync-mode must be 'immediate' or 'batch', got %q", c.WALSyncMode)
+	}
+	if c.MaxQueryWindow < 0 {
+		return fmt.Errorf("max-query-window must be >= 0, got %v", c.MaxQueryWindow)
 	}
 	if c.Bootstrap && len(c.Peers) == 0 {
 		return fmt.Errorf("bootstrap=true requires at least one peer (the node itself)")

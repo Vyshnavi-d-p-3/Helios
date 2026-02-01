@@ -108,7 +108,18 @@ func main() {
 
 	h := &api.Handler{Eng: eng, Version: Version}
 	mux := api.NewServeMux(h)
-	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: withPprof(mux)}
+	var handler http.Handler = mux
+	if cfg.Pprof {
+		handler = withPprof(mux)
+	}
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	go func() {
 		log.Printf("http listening on %s", cfg.HTTPAddr)
@@ -122,7 +133,14 @@ func main() {
 	if cfg.RetentionPeriod > 0 && cfg.RetentionGCTickInterval > 0 {
 		log.Printf("retention: background GC every %s (max SST age %s)", cfg.RetentionGCTickInterval, cfg.RetentionPeriod)
 	}
-	log.Printf("probes: GET /-/healthy /-/ready  pprof: GET /debug/pprof/  read: GET /api/v1/query /api/v1/query_range  write: POST /api/v1/write  flush: POST /api/v1/flush  POST /api/v1/retention  GET /metrics  data_dir=%s", cfg.DataDir)
+	if cfg.MaxQueryWindow > 0 {
+		log.Printf("max query window: %s", cfg.MaxQueryWindow)
+	}
+	pprofLine := "pprof: disabled"
+	if cfg.Pprof {
+		pprofLine = "pprof: GET /debug/pprof/ (local/trusted use)"
+	}
+	log.Printf("probes: GET /-/healthy /-/ready  %s  read: GET /api/v1/query /api/v1/query_range  write: POST /api/v1/write  flush: POST /api/v1/flush  compact: POST /api/v1/compact  retention: POST /api/v1/retention  GET /metrics  data_dir=%s", pprofLine, cfg.DataDir)
 	fmt.Fprintln(os.Stdout, "Helios: Ctrl+C to stop.")
 
 	sig := make(chan os.Signal, 1)

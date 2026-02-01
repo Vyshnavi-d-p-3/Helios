@@ -114,6 +114,9 @@ func (h *Handler) runReadQuery(q *prompb.Query) (*prompb.QueryResult, error) {
 	if start > end {
 		return nil, errors.New("start_timestamp_ms > end_timestamp_ms")
 	}
+	if err := h.Eng.CheckQueryTimeRange(start, end); err != nil {
+		return nil, err
+	}
 	plan, err := planRemoteReadMatchers(q.GetMatchers())
 	if err != nil {
 		return nil, err
