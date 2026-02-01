@@ -20,6 +20,19 @@ func (e *Engine) rebuildSeriesCardLocked() {
 			return true
 		})
 	}
+	for _, fm := range e.frozen {
+		if fm == nil {
+			continue
+		}
+		fm.ForEachUniqueSeriesKeyFromNameIndex(func(sk string) bool {
+			metric, _ := storage.ParseSeriesKeyString(sk)
+			if metric == "" {
+				return true
+			}
+			e.addSeriesToCardLocked(metric, sk)
+			return true
+		})
+	}
 	for _, t := range e.sst {
 		if t == nil {
 			continue

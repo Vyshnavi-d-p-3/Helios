@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,6 +63,15 @@ type Config struct {
 	// disables the cap (not recommended for public endpoints).
 	MaxQueryWindow time.Duration
 
+	AnomalyEnabled   bool
+	AnomalyAlpha     float64
+	AnomalyThreshold float64
+	AnomalyWarmup    int
+	AnomalyMaxSeries int
+	AnomalyStaleAfter time.Duration
+	BlockCacheMaxSamples int
+	MaxFrozenMemtables int
+
 	LogLevel string
 }
 
@@ -85,6 +95,14 @@ func DefaultConfig() Config {
 		MaxSeriesPerMetric:      100_000,
 		Pprof:                   false,
 		MaxQueryWindow:          90 * 24 * time.Hour,
+		AnomalyEnabled:          false,
+		AnomalyAlpha:            0.3,
+		AnomalyThreshold:        3.0,
+		AnomalyWarmup:           10,
+		AnomalyMaxSeries:        1_000_000,
+		AnomalyStaleAfter:       6 * time.Hour,
+		BlockCacheMaxSamples:    1_000_000,
+		MaxFrozenMemtables:      4,
 		LogLevel:                "info",
 	}
 }
@@ -125,6 +143,14 @@ func ParseArgs(fs *flag.FlagSet, args []string) (Config, error) {
 	fs.IntVar(&cfg.MaxSeriesPerMetric, "max-series-per-metric", cfg.MaxSeriesPerMetric, "Per-metric cardinality cap")
 	fs.BoolVar(&cfg.Pprof, "pprof", cfg.Pprof, "Expose /debug/pprof (disable on untrusted networks)")
 	fs.DurationVar(&cfg.MaxQueryWindow, "max-query-window", cfg.MaxQueryWindow, "Max time span for /query, /read; 0 = unlimited (risky for public services)")
+	fs.BoolVar(&cfg.AnomalyEnabled, "anomaly-enabled", cfg.AnomalyEnabled, "Enable anomaly detection and SSE stream")
+	fs.Float64Var(&cfg.AnomalyAlpha, "anomaly-alpha", cfg.AnomalyAlpha, "EWMA alpha in (0,1)")
+	fs.Float64Var(&cfg.AnomalyThreshold, "anomaly-threshold", cfg.AnomalyThreshold, "Anomaly z-score threshold (>0)")
+	fs.IntVar(&cfg.AnomalyWarmup, "anomaly-warmup", cfg.AnomalyWarmup, "Samples required before anomaly alerts")
+	fs.IntVar(&cfg.AnomalyMaxSeries, "anomaly-max-series", cfg.AnomalyMaxSeries, "Max tracked series in anomaly registry")
+	fs.DurationVar(&cfg.AnomalyStaleAfter, "anomaly-stale-after", cfg.AnomalyStaleAfter, "Evict anomaly detector state after inactivity")
+	fs.IntVar(&cfg.BlockCacheMaxSamples, "block-cache-max-samples", cfg.BlockCacheMaxSamples, "Max decoded samples to keep in block cache")
+	fs.IntVar(&cfg.MaxFrozenMemtables, "max-frozen-memtables", cfg.MaxFrozenMemtables, "Maximum queued frozen memtables before write backpressure")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "Log level: debug|info|warn|error")
 	fs.StringVar(&peersStr, "peers", strings.Join(cfg.Peers, ","), "Comma-separated Raft peers")
 
@@ -168,6 +194,45 @@ func (c *Config) applyEnv() {
 	getEnv("HELIOS_MAX_QUERY_WINDOW", func(v string) {
 		if d, err := time.ParseDuration(v); err == nil {
 			c.MaxQueryWindow = d
+		}
+	})
+	if v, ok := os.LookupEnv("HELIOS_ANOMALY_ENABLED"); ok {
+		v = strings.ToLower(strings.TrimSpace(v))
+		c.AnomalyEnabled = v == "1" || v == "true" || v == "yes" || v == "on"
+	}
+	getEnv("HELIOS_ANOMALY_ALPHA", func(v string) {
+		if x, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			c.AnomalyAlpha = x
+		}
+	})
+	getEnv("HELIOS_ANOMALY_THRESHOLD", func(v string) {
+		if x, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			c.AnomalyThreshold = x
+		}
+	})
+	getEnv("HELIOS_ANOMALY_WARMUP", func(v string) {
+		if x, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			c.AnomalyWarmup = x
+		}
+	})
+	getEnv("HELIOS_ANOMALY_MAX_SERIES", func(v string) {
+		if x, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			c.AnomalyMaxSeries = x
+		}
+	})
+	getEnv("HELIOS_ANOMALY_STALE_AFTER", func(v string) {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.AnomalyStaleAfter = d
+		}
+	})
+	getEnv("HELIOS_BLOCK_CACHE_MAX_SAMPLES", func(v string) {
+		if x, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			c.BlockCacheMaxSamples = x
+		}
+	})
+	getEnv("HELIOS_MAX_FROZEN_MEMTABLES", func(v string) {
+		if x, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			c.MaxFrozenMemtables = x
 		}
 	})
 
@@ -214,6 +279,20 @@ func (c Config) Validate() error {
 	}
 	if c.MaxQueryWindow < 0 {
 		return fmt.Errorf("max-query-window must be >= 0, got %v", c.MaxQueryWindow)
+	}
+	if c.AnomalyEnabled {
+		if c.AnomalyAlpha <= 0 || c.AnomalyAlpha >= 1 {
+			return fmt.Errorf("anomaly-alpha must be in (0,1), got %v", c.AnomalyAlpha)
+		}
+		if c.AnomalyThreshold <= 0 {
+			return fmt.Errorf("anomaly-threshold must be > 0, got %v", c.AnomalyThreshold)
+		}
+	}
+	if c.BlockCacheMaxSamples <= 0 {
+		return fmt.Errorf("block-cache-max-samples must be > 0, got %d", c.BlockCacheMaxSamples)
+	}
+	if c.MaxFrozenMemtables <= 0 {
+		return fmt.Errorf("max-frozen-memtables must be > 0, got %d", c.MaxFrozenMemtables)
 	}
 	if c.Bootstrap && len(c.Peers) == 0 {
 		return fmt.Errorf("bootstrap=true requires at least one peer (the node itself)")

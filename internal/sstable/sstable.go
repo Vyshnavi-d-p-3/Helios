@@ -11,7 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 
+	"github.com/vyshnavi-d-p-3/helios/internal/blockcache"
 	"github.com/vyshnavi-d-p-3/helios/internal/memtable"
 	"github.com/vyshnavi-d-p-3/helios/internal/storage"
 	"github.com/vyshnavi-d-p-3/helios/pkg/gorilla"
@@ -196,6 +199,7 @@ func readU32(f io.Reader) (uint32, error) {
 type Table struct {
 	path        string
 	file        *os.File // open for block reads; closed by Close
+	id          uint64
 	version     uint8
 	minT        int64
 	maxT        int64
@@ -203,6 +207,7 @@ type Table struct {
 	off         []int64
 	postings    map[string][]uint64
 	labelValues map[string][]string
+	cache       *blockcache.Cache
 }
 
 // Version is the on-disk table format (1 = blocks only, 2 = postings + label index).
@@ -333,7 +338,16 @@ func OpenTable(path string) (*Table, error) {
 		offsets = append(offsets, pos)
 		_ = i
 	}
-	t := &Table{path: path, file: f, version: ver, minT: minT, maxT: maxT, series: series, off: offsets}
+	t := &Table{
+		path:    path,
+		file:    f,
+		id:      parseSSTableID(path),
+		version: ver,
+		minT:    minT,
+		maxT:    maxT,
+		series:  series,
+		off:     offsets,
+	}
 	if ver == 1 {
 		closeOnErr = false
 		return t, nil
@@ -381,6 +395,10 @@ func (t *Table) Close() error {
 
 // Path returns the backing path.
 func (t *Table) Path() string { return t.path }
+func (t *Table) ID() uint64   { return t.id }
+
+// SetBlockCache sets an optional decoded-block cache for this table.
+func (t *Table) SetBlockCache(c *blockcache.Cache) { t.cache = c }
 
 // MinTime and MaxTime are the min/max sample timestamps in this table (file header; ms).
 func (t *Table) MinTime() int64 { return t.minT }
@@ -404,6 +422,11 @@ func (t *Table) QueryRange(series string, start, end int64) []storage.Sample {
 	idx := sort.SearchStrings(t.series, series)
 	if idx >= len(t.series) || t.series[idx] != series {
 		return nil
+	}
+	if t.cache != nil {
+		if cached, ok := t.cache.Get(blockcache.Key{SSTableID: t.id, SeriesID: uint64(idx)}); ok {
+			return filterSamplesInRange(cached, start, end)
+		}
 	}
 	f := t.file
 	if f == nil {
@@ -456,23 +479,50 @@ func (t *Table) QueryRange(series string, start, end int64) []storage.Sample {
 		ts = ts[:nPts]
 		val = val[:nPts]
 	}
-	var out []storage.Sample
+	all := make([]storage.Sample, 0, len(ts))
 	for i := range ts {
-		if ts[i] < start {
-			continue
-		}
-		if ts[i] > end {
-			break
-		}
-		out = append(out, storage.Sample{
+		all = append(all, storage.Sample{
 			Metric:    meta.Metric,
 			Labels:    meta.Labels,
 			Timestamp: ts[i],
 			Value:     val[i],
 		})
 	}
+	if t.cache != nil {
+		t.cache.Put(blockcache.Key{SSTableID: t.id, SeriesID: uint64(idx)}, all)
+	}
+	out := filterSamplesInRange(all, start, end)
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+func filterSamplesInRange(samples []storage.Sample, start, end int64) []storage.Sample {
+	if len(samples) == 0 {
+		return nil
+	}
+	out := make([]storage.Sample, 0, len(samples))
+	for i := range samples {
+		if samples[i].Timestamp < start {
+			continue
+		}
+		if samples[i].Timestamp > end {
+			break
+		}
+		out = append(out, samples[i])
+	}
+	return out
+}
+
+func parseSSTableID(path string) uint64 {
+	base := filepath.Base(path)
+	if len(base) < 8 {
+		return 0
+	}
+	head := strings.ToLower(base[:8])
+	if id, err := strconv.ParseUint(head, 16, 64); err == nil {
+		return id
+	}
+	return 0
 }

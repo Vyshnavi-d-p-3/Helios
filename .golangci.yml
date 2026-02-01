@@ -1,0 +1,54 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # catch ignored errors
+    - govet         # standard go vet checks
+    - ineffassign   # ineffective assignments
+    - staticcheck   # comprehensive
+    - unused        # dead code
+    - gofmt         # formatting
+    - goimports     # import ordering
+    - misspell      # typos
+    - bodyclose     # http.Response.Body.Close()
+    - gosec         # security checks (filtered below)
+    - revive        # style checks
+    - copyloopvar   # Go 1.22+ loop variable semantics
+
+linters-settings:
+  gosec:
+    excludes:
+      # G304: file path provided as taint input — Helios is intentionally a
+      # filesystem-using process. The data dir is operator-controlled.
+      - G304
+      # G404: math/rand — we use it intentionally for non-cryptographic
+      # things like jitter.
+      - G404
+
+  revive:
+    rules:
+      - name: var-naming
+      - name: errorf
+      - name: error-return
+      - name: error-strings
+      - name: indent-error-flow
+      - name: receiver-naming
+      - name: time-naming
+      - name: unused-parameter
+        disabled: true # too noisy for handler signatures
+
+issues:
+  max-same-issues: 0
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+    # The internal/api package wires concrete types; some tests reach into
+    # internals.
+    - path: internal/api/.*_test\.go
+      linters:
+        - revive

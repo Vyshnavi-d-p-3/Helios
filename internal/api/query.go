@@ -3,10 +3,13 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/vyshnavi-d-p-3/helios/internal/promql"
 	"github.com/vyshnavi-d-p-3/helios/internal/storage"
 )
 
@@ -34,6 +37,10 @@ func (h *Handler) registerQuery(mux *http.ServeMux) {
 func (h *Handler) queryInstant(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(r.Form.Get("query")) != "" {
+		h.queryInstantPromQL(w, r)
 		return
 	}
 	metric := strings.TrimSpace(r.Form.Get("metric"))
@@ -85,6 +92,10 @@ func (h *Handler) queryInstant(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) queryRange(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(r.Form.Get("query")) != "" {
+		h.queryRangePromQL(w, r)
 		return
 	}
 	metric := strings.TrimSpace(r.Form.Get("metric"))
@@ -151,6 +162,109 @@ func (h *Handler) queryRange(w http.ResponseWriter, r *http.Request) {
 	h.recordReadRequest("query_range")
 }
 
+func (h *Handler) queryInstantPromQL(w http.ResponseWriter, r *http.Request) {
+	if h.Promql == nil {
+		http.Error(w, "promql engine unavailable", http.StatusInternalServerError)
+		return
+	}
+	query := strings.TrimSpace(r.Form.Get("query"))
+	expr, err := promql.Parse(query)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ts, err := parsePromTimeParam(r, "time", time.Now().UnixMilli())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	res, err := promql.EvalInstant(h.Promql, expr, ts)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out := make([]map[string]any, 0, len(res.Vector))
+	for _, row := range res.Vector {
+		out = append(out, map[string]any{
+			"metric": promMetricObject(row.Metric, row.Labels),
+			"value":  []any{toPromSeconds(row.Timestamp), strconv.FormatFloat(row.Value, 'f', -1, 64)},
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(queryResponse{
+		Status: "success",
+		Data: map[string]any{
+			"resultType": "vector",
+			"result":     out,
+		},
+	})
+	h.recordReadRequest("query_instant")
+}
+
+func (h *Handler) queryRangePromQL(w http.ResponseWriter, r *http.Request) {
+	if h.Promql == nil {
+		http.Error(w, "promql engine unavailable", http.StatusInternalServerError)
+		return
+	}
+	query := strings.TrimSpace(r.Form.Get("query"))
+	expr, err := promql.Parse(query)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	start, err := parsePromTimeParam(r, "start", -1)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	end, err := parsePromTimeParam(r, "end", -1)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if end < start {
+		http.Error(w, "end before start", http.StatusBadRequest)
+		return
+	}
+	if err := h.Eng.CheckQueryTimeRange(start, end); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	step, err := parsePromStepParam(r, "step")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	res, err := promql.EvalRange(h.Promql, expr, start, end, step)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out := make([]map[string]any, 0, len(res.Matrix))
+	for _, series := range res.Matrix {
+		values := make([][]any, 0, len(series.Samples))
+		for _, sample := range series.Samples {
+			values = append(values, []any{
+				toPromSeconds(sample.Timestamp),
+				strconv.FormatFloat(sample.Value, 'f', -1, 64),
+			})
+		}
+		out = append(out, map[string]any{
+			"metric": promMetricObject(series.Metric, series.Labels),
+			"values": values,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(queryResponse{
+		Status: "success",
+		Data: map[string]any{
+			"resultType": "matrix",
+			"result":     out,
+		},
+	})
+	h.recordReadRequest("query_range")
+}
+
 func parseBoolParam(r *http.Request, name string) bool {
 	s := strings.TrimSpace(strings.ToLower(r.Form.Get(name)))
 	return s == "1" || s == "true" || s == "yes"
@@ -162,6 +276,39 @@ func parseInt64Param(r *http.Request, name string) (int64, error) {
 		return 0, fmt.Errorf("missing %q", name)
 	}
 	return strconv.ParseInt(s, 10, 64)
+}
+
+func parsePromTimeParam(r *http.Request, name string, def int64) (int64, error) {
+	s := strings.TrimSpace(r.Form.Get(name))
+	if s == "" {
+		if def >= 0 {
+			return def, nil
+		}
+		return 0, fmt.Errorf("missing %q", name)
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %q: %w", name, err)
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("invalid %q", name)
+	}
+	return int64(v * 1000), nil
+}
+
+func parsePromStepParam(r *http.Request, name string) (int64, error) {
+	s := strings.TrimSpace(r.Form.Get(name))
+	if s == "" {
+		return 0, fmt.Errorf("missing %q", name)
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %q: %w", name, err)
+	}
+	if v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("invalid %q", name)
+	}
+	return int64(v * 1000), nil
 }
 
 // parseLabelParams collects query parameters of the form l_<name>=<value> into a label map.
@@ -213,4 +360,19 @@ func toVectorResult(metric string, labels map[string]string, points []storage.Sa
 		Timestamp: p.Timestamp,
 		Value:     p.Value,
 	}}
+}
+
+func promMetricObject(metric string, labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels)+1)
+	if metric != "" {
+		out["__name__"] = metric
+	}
+	for k, v := range labels {
+		out[k] = v
+	}
+	return out
+}
+
+func toPromSeconds(tsMillis int64) float64 {
+	return float64(tsMillis) / 1000.0
 }

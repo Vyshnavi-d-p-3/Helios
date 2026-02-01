@@ -26,3 +26,21 @@ func TestParseArgs_freshFlagSet(t *testing.T) {
 		t.Fatalf("bootstrap/peers: %+v", cfg)
 	}
 }
+
+func TestValidate_anomalySettings(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AnomalyEnabled = true
+	cfg.AnomalyAlpha = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation error for alpha")
+	}
+	cfg.AnomalyAlpha = 0.3
+	cfg.AnomalyThreshold = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation error for threshold")
+	}
+	cfg.AnomalyThreshold = 3.0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}

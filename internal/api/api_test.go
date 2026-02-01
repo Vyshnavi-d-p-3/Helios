@@ -405,6 +405,205 @@ func TestAPI_query_range_partial(t *testing.T) {
 	}
 }
 
+func TestAPI_query_promql_instant(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dir
+	eng, err := engine.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	_ = eng.Write([]storage.Sample{
+		{Metric: "up", Labels: map[string]string{"job": "api"}, Timestamp: 10_000, Value: 1},
+	})
+	h := &Handler{Eng: eng, Version: "test"}
+	srv := httptest.NewServer(NewServeMux(h))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/v1/query?query=up&time=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+
+	var out struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric map[string]string `json:"metric"`
+				Value  []any             `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "success" || out.Data.ResultType != "vector" {
+		t.Fatalf("unexpected response %+v", out)
+	}
+	if len(out.Data.Result) != 1 {
+		t.Fatalf("result len %d", len(out.Data.Result))
+	}
+	if out.Data.Result[0].Metric["__name__"] != "up" {
+		t.Fatalf("metric object %+v", out.Data.Result[0].Metric)
+	}
+}
+
+func TestAPI_query_promql_matchers(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dir
+	eng, err := engine.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	_ = eng.Write([]storage.Sample{
+		{Metric: "up", Labels: map[string]string{"job": "api"}, Timestamp: 10_000, Value: 1},
+		{Metric: "up", Labels: map[string]string{"job": "web"}, Timestamp: 10_000, Value: 2},
+	})
+	h := &Handler{Eng: eng, Version: "test"}
+	srv := httptest.NewServer(NewServeMux(h))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/v1/query?query=up%7Bjob%3D%22api%22%7D&time=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		Data struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Data.Result) != 1 || out.Data.Result[0].Metric["job"] != "api" {
+		t.Fatalf("unexpected result %+v", out.Data.Result)
+	}
+}
+
+func TestAPI_query_promql_range(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dir
+	eng, err := engine.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	_ = eng.Write([]storage.Sample{
+		{Metric: "req", Labels: map[string]string{"job": "api"}, Timestamp: 0, Value: 0},
+		{Metric: "req", Labels: map[string]string{"job": "api"}, Timestamp: 60_000, Value: 60},
+		{Metric: "req", Labels: map[string]string{"job": "api"}, Timestamp: 120_000, Value: 120},
+		{Metric: "req", Labels: map[string]string{"job": "api"}, Timestamp: 180_000, Value: 180},
+		{Metric: "req", Labels: map[string]string{"job": "api"}, Timestamp: 240_000, Value: 240},
+		{Metric: "req", Labels: map[string]string{"job": "api"}, Timestamp: 300_000, Value: 300},
+	})
+	h := &Handler{Eng: eng, Version: "test"}
+	srv := httptest.NewServer(NewServeMux(h))
+	defer srv.Close()
+
+	u := srv.URL + "/api/v1/query_range?query=rate(req%5B5m%5D)&start=0&end=300&step=15"
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Values [][]any `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "success" || out.Data.ResultType != "matrix" {
+		t.Fatalf("unexpected response %+v", out)
+	}
+}
+
+func TestAPI_query_promql_aggregation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dir
+	eng, err := engine.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	_ = eng.Write([]storage.Sample{
+		{Metric: "up", Labels: map[string]string{"job": "api"}, Timestamp: 10_000, Value: 1},
+		{Metric: "up", Labels: map[string]string{"job": "api"}, Timestamp: 10_000, Value: 2},
+	})
+	h := &Handler{Eng: eng, Version: "test"}
+	srv := httptest.NewServer(NewServeMux(h))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/v1/query?query=sum%20by%20(job)%20(up)&time=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		Data struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Data.Result) != 1 || out.Data.Result[0].Metric["job"] != "api" {
+		t.Fatalf("unexpected result %+v", out.Data.Result)
+	}
+}
+
+func TestAPI_query_promql_parseError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dir
+	eng, err := engine.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	h := &Handler{Eng: eng, Version: "test"}
+	srv := httptest.NewServer(NewServeMux(h))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/v1/query?query=rate(up)&time=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
 func TestAPI_labelRoutes(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.DefaultConfig()

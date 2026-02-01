@@ -27,6 +27,11 @@ func (e *Engine) collectLabelFilterKeysLocked(metric string, want map[string]str
 	for _, sk := range e.mem.SeriesKeysForLabelFilter(metric, want) {
 		cand[sk] = struct{}{}
 	}
+	for _, fm := range e.frozen {
+		for _, sk := range fm.SeriesKeysForLabelFilter(metric, want) {
+			cand[sk] = struct{}{}
+		}
+	}
 	for _, t := range e.sst {
 		for _, sk := range t.LocalSeriesForFilter(metric, want) {
 			cand[sk] = struct{}{}

@@ -89,6 +89,95 @@ func (h *Handler) registerMetrics(mux *http.ServeMux) {
 			func() float64 { return float64(h.Eng.NextWALSeq()) },
 		),
 	)
+	reg.MustRegister(
+		prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Namespace: "helios",
+				Subsystem: "blockcache",
+				Name:      "entries",
+				Help:      "Number of decoded series entries in block cache.",
+			},
+			func() float64 {
+				if snap, ok := h.Eng.BlockCacheSnapshot(); ok {
+					return float64(snap.Entries)
+				}
+				return 0
+			},
+		),
+		prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Namespace: "helios",
+				Subsystem: "blockcache",
+				Name:      "samples",
+				Help:      "Total cached decoded samples in block cache.",
+			},
+			func() float64 {
+				if snap, ok := h.Eng.BlockCacheSnapshot(); ok {
+					return float64(snap.Samples)
+				}
+				return 0
+			},
+		),
+		prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Namespace: "helios",
+				Subsystem: "blockcache",
+				Name:      "hits_total",
+				Help:      "Total block cache hits.",
+			},
+			func() float64 {
+				if snap, ok := h.Eng.BlockCacheSnapshot(); ok {
+					return float64(snap.Hits)
+				}
+				return 0
+			},
+		),
+		prometheus.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Namespace: "helios",
+				Subsystem: "blockcache",
+				Name:      "misses_total",
+				Help:      "Total block cache misses.",
+			},
+			func() float64 {
+				if snap, ok := h.Eng.BlockCacheSnapshot(); ok {
+					return float64(snap.Misses)
+				}
+				return 0
+			},
+		),
+	)
+	if h.Anomaly != nil && h.Anomaly.Reg != nil {
+		reg.MustRegister(
+			prometheus.NewGaugeFunc(
+				prometheus.GaugeOpts{
+					Namespace: "helios",
+					Subsystem: "anomaly",
+					Name:      "series",
+					Help:      "Series currently tracked by the anomaly registry.",
+				},
+				func() float64 { return float64(h.Anomaly.Reg.Snapshot().SeriesCount) },
+			),
+			prometheus.NewGaugeFunc(
+				prometheus.GaugeOpts{
+					Namespace: "helios",
+					Subsystem: "anomaly",
+					Name:      "evictions_total",
+					Help:      "Total anomaly detector state evictions.",
+				},
+				func() float64 { return float64(h.Anomaly.Reg.Snapshot().EvictionsTotal) },
+			),
+			prometheus.NewGaugeFunc(
+				prometheus.GaugeOpts{
+					Namespace: "helios",
+					Subsystem: "anomaly",
+					Name:      "nan_rejects_total",
+					Help:      "Total non-finite values rejected by anomaly detector.",
+				},
+				func() float64 { return float64(h.Anomaly.Reg.Snapshot().NaNRejects) },
+			),
+		)
+	}
 	v := h.Version
 	if v == "" {
 		v = "unknown"

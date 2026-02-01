@@ -1,0 +1,76 @@
+# Helios — Cursor Project Rules
+
+## Project context
+Helios is a single-node time-series database in Go that ingests Prometheus
+remote_write and serves Prometheus-compatible reads (Grafana works against it).
+Storage is an LSM tree (WAL → memtable → SSTables) with Gorilla compression and
+a per-SST postings index for label-set lookups. Repo is at
+github.com/vyshnavi-d-p-3/helios. Module is go 1.23.
+
+## What is built and works
+- Engine: WAL append + crash recovery + memtable insert + SST flush + read merge
+- Gorilla v2 encoder/decoder (with the `leading >= 32` clamp and the explicit
+  `meaningful == 64 → 0` mapping)
+- SSTable v2 format with postings + label-values sections
+- Label-equality selectors via the postings path
+- Cardinality enforcement at write time
+- Background retention GC by max-timestamp age
+- HTTP API: write (JSON + Prometheus protobuf+snappy), read (remote_read +
+  query/query_range with label filters), labels, series, flush, compact, status
+- Operator probes (/-/healthy, /-/ready), /metrics, pprof gating, body limits
+
+## What is being added in the current sprint
+1. PromQL subset: parser → AST → evaluator. Functions: rate, irate, increase,
+   avg_over_time, sum_over_time, count_over_time, max_over_time, min_over_time.
+   Aggregations: sum, count, avg, min, max with optional `by ()`.
+   Matcher operators: =, !=, =~, !~ (already partial).
+2. Streaming anomaly detection: EWMA detector + bounded LRU registry +
+   Server-Sent Events endpoint.
+3. Block cache for SST reads.
+4. Binary WAL framing (replacing the JSON-marshaled payload).
+5. Active/frozen memtable split with background flush.
+6. CI + golangci-lint + race-detector test runs.
+
+## Coding standards (enforce strictly)
+- Errors are wrapped with `fmt.Errorf("context: %w", err)`. Never swallow.
+- Public types and functions get godoc comments that say *why*, not what.
+- Tests are table-driven with subtests; use t.TempDir() for filesystem state.
+- Engine, memtable, postings index — all use sync.Mutex; document the lock.
+- Hot-path functions allocate zero on the success path. Use sync.Pool when needed.
+- Filesystem code uses 0o640 for files, 0o750 for dirs.
+- HTTP handlers always wrap with http.MaxBytesReader on bodies they read.
+- Prefer `slog` over `log`. The repo currently uses `log` — leave existing code,
+  use slog in new code.
+- Never write JSON for hot-path data formats. Use encoding/binary.
+
+## Known traps Cursor must avoid
+- Do not use encoding/json in WAL records. Use length-prefix + crc32c + binary
+  framing (see internal/wal/wal.go for the framing; only the *payload* needs to
+  switch from JSON to binary).
+- Do not introduce new packages under github.com/vyshnavi-d-p-3/helios without
+  reading the existing import graph first. The engine package owns SSTables
+  and memtable; do not let API-layer code reach past the engine.
+- Do not change Gorilla. The encoder/decoder are correct after v2 fixes.
+- Do not change SSTable format without bumping the magic and adding a fallback
+  path for old files.
+- Do not call flag.Parse against the global FlagSet — config.ParseArgs is the
+  testable entry point.
+- The memtable is an huandu/skiplist. Do not introduce a second memtable
+  implementation; extend the existing one.
+- The engine's mu is taken for both reads and writes. Do not split it without
+  careful thought — there is currently no per-series locking.
+
+## Test conventions
+- Unit tests: `go test ./...` must pass with `-race`. CI runs with -race.
+- For new packages, target ≥80% line coverage on logic (parsers, evaluators,
+  detectors, etc.). Don't bother with coverage on glue.
+- Property-based tests (pgregory.net/rapid) are encouraged for parsers and
+  storage invariants but not required for handlers.
+- Benchmarks live alongside the code as `*_bench_test.go` (prefer this name
+  pattern so a single `go test -run X -bench .` filters cleanly).
+
+## Style
+- Short identifiers in tight inner loops; descriptive names elsewhere.
+- Comments explain non-obvious decisions, not restate the code.
+- Group imports: stdlib, third-party, local.
+- No init() functions for behavior — only for registering metrics or similar.

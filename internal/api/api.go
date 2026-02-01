@@ -24,6 +24,8 @@ const maxWriteBodyBytes = 4 << 20
 type Handler struct {
 	Eng     *engine.Engine
 	Version string
+	Promql  *engineAdapter
+	Anomaly *AnomalyHandler
 	// Set by registerMetrics; optional for tests that bypass NewServeMux.
 	ingestSamplesCommitted prometheus.Counter
 	ingestRejected         *prometheus.CounterVec
@@ -48,6 +50,9 @@ func (h *Handler) recordAPIRequest(handler string) {
 // NewServeMux returns a mux with write, flush, compact, health, label discovery, series, and query routes.
 func NewServeMux(h *Handler) *http.ServeMux {
 	mux := http.NewServeMux()
+	if h.Promql == nil && h.Eng != nil {
+		h.Promql = newEngineAdapter(h.Eng)
+	}
 	h.registerMetrics(mux)
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /-/healthy", h.probeHealthy)
@@ -61,6 +66,9 @@ func NewServeMux(h *Handler) *http.ServeMux {
 	h.registerQuery(mux)
 	h.registerLabelRoutes(mux)
 	h.registerSeriesRoute(mux)
+	if h.Anomaly != nil {
+		h.Anomaly.Register(mux)
+	}
 	return mux
 }
 

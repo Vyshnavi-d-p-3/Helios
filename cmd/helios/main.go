@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vyshnavi-d-p-3/helios/internal/anomaly"
 	"github.com/vyshnavi-d-p-3/helios/internal/api"
 	"github.com/vyshnavi-d-p-3/helios/internal/config"
 	"github.com/vyshnavi-d-p-3/helios/internal/engine"
@@ -107,6 +108,29 @@ func main() {
 	}
 
 	h := &api.Handler{Eng: eng, Version: Version}
+	if cfg.AnomalyEnabled {
+		reg := anomaly.NewRegistry(anomaly.RegistryConfig{
+			Alpha:      cfg.AnomalyAlpha,
+			Threshold:  cfg.AnomalyThreshold,
+			Warmup:     cfg.AnomalyWarmup,
+			MaxSeries:  cfg.AnomalyMaxSeries,
+			StaleAfter: cfg.AnomalyStaleAfter,
+		})
+		eng.AttachAnomalyRegistry(reg)
+		h.Anomaly = &api.AnomalyHandler{Reg: reg}
+		go func() {
+			t := time.NewTicker(10 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-t.C:
+					reg.PruneStale(time.Now())
+				}
+			}
+		}()
+	}
 	mux := api.NewServeMux(h)
 	var handler http.Handler = mux
 	if cfg.Pprof {

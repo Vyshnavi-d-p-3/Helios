@@ -9,6 +9,7 @@ require (
 	github.com/huandu/skiplist v1.2.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/prometheus v0.52.0
+	google.golang.org/protobuf v1.36.8
 )
 
 require (
@@ -22,5 +23,4 @@ require (
 	github.com/prometheus/procfs v0.16.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/sys v0.35.0 // indirect
-	google.golang.org/protobuf v1.36.8 // indirect
 )

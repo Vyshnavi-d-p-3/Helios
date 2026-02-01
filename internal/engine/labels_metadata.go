@@ -11,6 +11,11 @@ func (e *Engine) AllLabelNames() []string {
 	for _, n := range e.mem.LabelNames() {
 		seen[n] = struct{}{}
 	}
+	for _, fm := range e.frozen {
+		for _, n := range fm.LabelNames() {
+			seen[n] = struct{}{}
+		}
+	}
 	for _, t := range e.sst {
 		for _, n := range t.AllLabelNames() {
 			seen[n] = struct{}{}
@@ -38,6 +43,11 @@ func (e *Engine) AllLabelValues(name string) []string {
 	seen := make(map[string]struct{})
 	for _, v := range e.mem.LabelValuesForName(name) {
 		seen[v] = struct{}{}
+	}
+	for _, fm := range e.frozen {
+		for _, v := range fm.LabelValuesForName(name) {
+			seen[v] = struct{}{}
+		}
 	}
 	for _, t := range e.sst {
 		vs := t.LabelValues(name)

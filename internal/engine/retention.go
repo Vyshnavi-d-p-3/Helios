@@ -36,6 +36,9 @@ func (e *Engine) EnforceRetention() (removed int, err error) {
 			keep = append(keep, t)
 			continue
 		}
+		if e.cache != nil {
+			e.cache.InvalidateSSTable(t.ID())
+		}
 		_ = t.Close()
 		if err := os.Remove(t.Path()); err != nil {
 			return removed, err

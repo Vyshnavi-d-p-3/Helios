@@ -18,6 +18,7 @@ vendor/
 
 # Data & local state
 /data/
+/tmp/
 tmp-helios-run/
 *.db
 *.db-shm

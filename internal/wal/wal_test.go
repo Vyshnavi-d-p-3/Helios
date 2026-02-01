@@ -1,6 +1,9 @@
 package wal
 
 import (
+	"encoding/binary"
+	"encoding/json"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -94,5 +97,58 @@ func TestWAL_rejectsCorruptCrc(t *testing.T) {
 	_ = os.WriteFile(p, b, 0o644)
 	if _, err := Open(p); err == nil {
 		t.Fatal("expected replay error on corrupt wal")
+	}
+}
+
+func TestWAL_openAndScan_HLW1Compatibility(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "v1.wal")
+	entry := Entry{
+		Seq: 1,
+		Samples: []storage.Sample{{
+			Metric:    "m",
+			Labels:    map[string]string{"job": "api"},
+			Timestamp: 10,
+			Value:     2.5,
+		}},
+	}
+	payload, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 0, 4+4+len(payload)+4)
+	b = append(b, magicV1...)
+	var hdr [4]byte
+	binary.LittleEndian.PutUint32(hdr[:], uint32(len(payload)))
+	b = append(b, hdr[:]...)
+	b = append(b, payload...)
+	binary.LittleEndian.PutUint32(hdr[:], crc32.Checksum(payload, castagnoli))
+	b = append(b, hdr[:]...)
+	if err := os.WriteFile(p, b, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.NextSeq() != 2 {
+		t.Fatalf("next seq=%d", w.NextSeq())
+	}
+	if _, err := w.Append([]storage.Sample{{Metric: "m", Timestamp: 20, Value: 3.0}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got int
+	if err := Scan(p, func(e Entry) error {
+		got++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got != 2 {
+		t.Fatalf("entries=%d", got)
 	}
 }

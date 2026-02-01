@@ -30,8 +30,12 @@ func (e *Engine) CompactL0() error {
 		_ = os.Remove(outPath)
 		return err
 	}
+	newT.SetBlockCache(e.cache)
 	for _, t := range e.sst {
 		if t != nil {
+			if e.cache != nil {
+				e.cache.InvalidateSSTable(t.ID())
+			}
 			_ = t.Close()
 			_ = os.Remove(t.Path())
 		}
