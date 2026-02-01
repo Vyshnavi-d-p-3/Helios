@@ -6,11 +6,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/vyshnavi-d-p-3/helios/internal/config"
-	"github.com/vyshnavi-d-p-3/helios/internal/wal"
+	"github.com/vyshnavi-d-p-3/helios/internal/engine"
 )
 
 // Version is set at build time (e.g. -ldflags "-X main.Version=0.1.0").
@@ -32,16 +31,15 @@ func main() {
 		log.Fatalf("data dir: %v", err)
 	}
 
-	walPath := filepath.Join(cfg.DataDir, "wal", "000001.log")
-	w, err := wal.Open(walPath)
+	eng, err := engine.Open(cfg)
 	if err != nil {
-		log.Fatalf("wal: %v", err)
+		log.Fatalf("engine: %v", err)
 	}
-	defer w.Close()
+	defer eng.Close()
 
-	log.Printf("helios %s node=%s http=%s next_wal_seq=%d",
-		Version, cfg.NodeID, cfg.HTTPAddr, w.NextSeq())
-	log.Printf("storage data_dir=%s (WAL+engine work in progress)", cfg.DataDir)
+	log.Printf("helios %s node=%s http=%s mem_points=%d next_wal_seq=%d",
+		Version, cfg.NodeID, cfg.HTTPAddr, eng.MemLen(), eng.NextWALSeq())
+	log.Printf("storage data_dir=%s (WAL + memtable; HTTP/query next)", cfg.DataDir)
 	fmt.Fprintln(os.Stdout, "Helios: signal SIGINT or SIGTERM to stop.")
 
 	sig := make(chan os.Signal, 1)
