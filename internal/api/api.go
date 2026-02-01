@@ -26,8 +26,18 @@ func NewServeMux(h *Handler) *http.ServeMux {
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /api/v1/status", h.status)
 	mux.HandleFunc("POST /api/v1/write", h.writeJSON)
+	mux.HandleFunc("POST /api/v1/flush", h.flush)
 	h.registerQuery(mux)
 	return mux
+}
+
+func (h *Handler) flush(w http.ResponseWriter, r *http.Request) {
+	_ = r
+	if err := h.Eng.Flush(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +53,7 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"status":       "ok",
 		"version":      h.Version,
 		"mem_points":   h.Eng.MemLen(),
+		"sstables":     h.Eng.SSTCount(),
 		"next_wal_seq": h.Eng.NextWALSeq(),
 	})
 }

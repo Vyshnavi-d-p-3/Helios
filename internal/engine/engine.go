@@ -6,25 +6,28 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/vyshnavi-d-p-3/helios/internal/config"
 	"github.com/vyshnavi-d-p-3/helios/internal/memtable"
+	"github.com/vyshnavi-d-p-3/helios/internal/sstable"
 	"github.com/vyshnavi-d-p-3/helios/internal/storage"
 	"github.com/vyshnavi-d-p-3/helios/internal/wal"
 )
 
-// Engine coordinates durable append (WAL) and in-memory reads (memtable).
+// Engine coordinates durable append (WAL), memtable, and optional SSTs on disk.
 type Engine struct {
-	cfg config.Config
-	mu  sync.Mutex
-	wal *wal.WAL
-	mem *memtable.Memtable
+	cfg   config.Config
+	mu    sync.Mutex
+	wal   *wal.WAL
+	mem   *memtable.Memtable
+	sst   []*sstable.Table
+	sstID int
 }
 
-// Open loads configuration paths, replays the WAL into a memtable, then opens
-// the WAL for new appends. On a missing WAL the memtable starts empty; Open
-// then creates the file.
+// Open loads configuration paths, replays the WAL, opens the WAL for appends,
+// and opens every *.sst under data/sst/ (sorted by name) for read.
 func Open(cfg config.Config) (*Engine, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -43,7 +46,30 @@ func Open(cfg config.Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{cfg: cfg, wal: w, mem: mem}, nil
+	eng := &Engine{cfg: cfg, wal: w, mem: mem}
+	if err := eng.loadSSTs(); err != nil {
+		_ = w.Close()
+		return nil, err
+	}
+	return eng, nil
+}
+
+func (e *Engine) loadSSTs() error {
+	pat := filepath.Join(e.cfg.DataDir, "sst", "*.sst")
+	matches, err := filepath.Glob(pat)
+	if err != nil {
+		return err
+	}
+	sort.Strings(matches)
+	for _, p := range matches {
+		t, err := sstable.OpenTable(p)
+		if err != nil {
+			return err
+		}
+		e.sst = append(e.sst, t)
+	}
+	e.sstID = len(matches) + 1
+	return nil
 }
 
 // Write appends a batch to the WAL, then updates the memtable. WAL is first
@@ -69,14 +95,82 @@ func (e *Engine) Write(samples []storage.Sample) error {
 	return nil
 }
 
-// QueryRange reads from the memtable for a canonical series string.
+// QueryRange returns samples for a series key from SSTs and the memtable.
+// Later layers (e.g. mem after SST) win on the same (series, timestamp).
 func (e *Engine) QueryRange(series string, start, end int64) []storage.Sample {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.mem.QueryRange(series, start, end)
+	return e.queryRangeLocked(series, start, end)
 }
 
-// MemLen returns the number of points in the memtable (for metrics/debug).
+func (e *Engine) queryRangeLocked(series string, start, end int64) []storage.Sample {
+	if start > end {
+		return nil
+	}
+	last := make(map[int64]storage.Sample)
+	for _, t := range e.sst {
+		for _, s := range t.QueryRange(series, start, end) {
+			if s.Timestamp >= start && s.Timestamp <= end {
+				last[s.Timestamp] = s
+			}
+		}
+	}
+	for _, s := range e.mem.QueryRange(series, start, end) {
+		if s.Timestamp >= start && s.Timestamp <= end {
+			last[s.Timestamp] = s
+		}
+	}
+	if len(last) == 0 {
+		return nil
+	}
+	keys := make([]int64, 0, len(last))
+	for ts := range last {
+		keys = append(keys, ts)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	out := make([]storage.Sample, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, last[k])
+	}
+	return out
+}
+
+// Flush materializes the memtable to a new .sst file, truncates the WAL, and
+// leaves the memtable empty. A no-op if the memtable is empty.
+func (e *Engine) Flush() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.mem.Len() == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join(e.cfg.DataDir, "sst"), 0o750); err != nil {
+		return err
+	}
+	sstPath := filepath.Join(e.cfg.DataDir, "sst", fmt.Sprintf("%08d.sst", e.sstID))
+	if err := sstable.WriteFromMemtable(sstPath, e.mem); err != nil {
+		return err
+	}
+	t, err := sstable.OpenTable(sstPath)
+	if err != nil {
+		return err
+	}
+	e.sst = append(e.sst, t)
+	e.sstID++
+	e.mem.Clear()
+	if err := e.wal.Truncate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SSTCount is the number of on-disk sstables in use.
+func (e *Engine) SSTCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.sst)
+}
+
+// MemLen returns the number of points in the memtable.
 func (e *Engine) MemLen() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()

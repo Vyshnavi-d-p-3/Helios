@@ -152,6 +152,44 @@ func (w *WAL) Close() error {
 	return err
 }
 
+// Truncate clears the WAL to an empty (magic-only) file, resets the sequence, and
+// reopens the writer. Call after a successful SST flush so on-disk data matches
+// the logical checkpoint; new writes get fresh sequence numbers.
+func (w *WAL) Truncate() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.f != nil {
+		if w.wb != nil {
+			_ = w.wb.Flush()
+		}
+		_ = w.f.Close()
+		w.f, w.wb = nil, nil
+	}
+	if err := os.Truncate(w.path, 0); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_RDWR, 0o640)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(magic); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+		return err
+	}
+	w.f = f
+	w.wb = bufio.NewWriterSize(f, 1<<20)
+	w.seq = 0
+	return nil
+}
+
 func writeRecord(bw *bufio.Writer, payload []byte) error {
 	var hdr [4]byte
 	binary.LittleEndian.PutUint32(hdr[:], uint32(len(payload)))

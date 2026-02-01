@@ -8,6 +8,41 @@ import (
 	"github.com/vyshnavi-d-p-3/helios/internal/storage"
 )
 
+func TestEngine_flush_then_read(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dir
+	eng, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	_ = eng.Write([]storage.Sample{
+		{Metric: "x", Timestamp: 5, Value: 3},
+	})
+	if err := eng.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if eng.MemLen() != 0 {
+		t.Fatalf("mem after flush: %d", eng.MemLen())
+	}
+	if eng.SSTCount() != 1 {
+		t.Fatalf("sst count %d", eng.SSTCount())
+	}
+	sk := storage.SeriesKey("x", nil)
+	q := eng.QueryRange(sk, 0, 10)
+	if len(q) != 1 || q[0].Value != 3 {
+		t.Fatalf("query from sst %+v", q)
+	}
+	_ = eng.Write([]storage.Sample{
+		{Metric: "x", Timestamp: 6, Value: 4},
+	})
+	q2 := eng.QueryRange(sk, 0, 20)
+	if len(q2) != 2 {
+		t.Fatalf("merged %+v", q2)
+	}
+}
+
 func TestEngine_write_reopen(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.DefaultConfig()

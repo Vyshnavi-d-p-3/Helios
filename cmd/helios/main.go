@@ -54,7 +54,7 @@ func main() {
 
 	log.Printf("helios %s node=%s mem_points=%d next_wal_seq=%d",
 		Version, cfg.NodeID, eng.MemLen(), eng.NextWALSeq())
-	log.Printf("read: GET /api/v1/query /api/v1/query_range  write: POST /api/v1/write  data_dir=%s", cfg.DataDir)
+	log.Printf("read: GET /api/v1/query /api/v1/query_range  write: POST /api/v1/write  flush: POST /api/v1/flush  data_dir=%s", cfg.DataDir)
 	fmt.Fprintln(os.Stdout, "Helios: Ctrl+C to stop.")
 
 	sig := make(chan os.Signal, 1)

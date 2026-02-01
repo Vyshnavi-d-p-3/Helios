@@ -63,6 +63,21 @@ func (m *Memtable) Len() int { return m.list.Len() }
 // ApproxBytes is a rough footprint estimate.
 func (m *Memtable) ApproxBytes() int64 { return m.approxB }
 
+// ForEach iterates in (series, time) order. Stops if fn returns false.
+func (m *Memtable) ForEach(fn func(s storage.Sample) bool) {
+	for e := m.list.Front(); e != nil; e = e.Next() {
+		if !fn(e.Value.(storage.Sample)) {
+			return
+		}
+	}
+}
+
+// Clear removes all points (e.g. after a successful flush).
+func (m *Memtable) Clear() {
+	m.list.Init()
+	m.approxB = 0
+}
+
 // QueryRange returns samples for one series string with timestamp in [start, end] inclusive.
 // Results are ordered by time ascending.
 func (m *Memtable) QueryRange(series string, start, end int64) []storage.Sample {
