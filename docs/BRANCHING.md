@@ -17,7 +17,7 @@ Release tags (`v0.1.0`) on `main` are the durable record of what shipped, not fa
 - **Every commit must have a real diff** (documentation, code, or config that changes). Do **not** use `git commit --allow-empty` to “shape” the history graph.
 - **The message must match the diff.** If a commit only edits `docs/`, do not say you changed the WAL; if you only wire one flag, the subject should say that.
 - **A merge should combine two lines of work that differ.** If you would merge with **no file change** and no real integration story, use **fast-forward** instead of `--no-ff`. Reserve merge commits for when feature branches (or `develop` vs `main`) actually add commits on one side.
-- **Tools:** Optional footers in commit messages (`Co-authored-by`, etc.) are fine if true; do not paste generic “AI generated” stamps that are not part of your project’s convention.
+- **Tools / editors:** Some IDEs append a `Made-with: …` line to every commit. Turn that off in settings if you can; it makes messages look templated. Optional footers like `Co-authored-by:` are fine when they are true.
 
 ## Why merge commits (not only fast-forwards)
 
