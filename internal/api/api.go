@@ -26,6 +26,7 @@ func NewServeMux(h *Handler) *http.ServeMux {
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /api/v1/status", h.status)
 	mux.HandleFunc("POST /api/v1/write", h.writeJSON)
+	h.registerQuery(mux)
 	return mux
 }
 
