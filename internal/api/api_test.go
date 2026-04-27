@@ -319,7 +319,10 @@ func TestAPI_write_and_status(t *testing.T) {
 		t.Fatalf("write status %d", resp.StatusCode)
 	}
 
-	r2, _ := http.Get(srv.URL + "/api/v1/status")
+	r2, err := http.Get(srv.URL + "/api/v1/status")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer r2.Body.Close()
 	var st map[string]interface{}
 	_ = json.NewDecoder(r2.Body).Decode(&st)

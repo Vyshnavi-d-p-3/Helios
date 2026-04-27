@@ -26,8 +26,12 @@ func (n *Node) LeaderForwardingHandler(localHandler http.HandlerFunc) http.Handl
 			http.Error(w, "leader http address unknown", http.StatusServiceUnavailable)
 			return
 		}
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
 		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		targetURL := fmt.Sprintf("http://%s%s", httpAddr, r.URL.RequestURI())
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
 		if err != nil {

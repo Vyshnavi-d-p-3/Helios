@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -53,7 +54,25 @@ type peerInfo struct {
 }
 
 func parsePeer(s string) peerInfo {
-	// id@raft:port:http_port
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return peerInfo{}
+	}
+	// Docker-style: nodeId=host:raftPort (HTTP assumed host:8080 unless overridden elsewhere).
+	if idx := strings.Index(s, "="); idx > 0 && !strings.Contains(s[:idx], "@") {
+		id := strings.TrimSpace(s[:idx])
+		hostport := strings.TrimSpace(s[idx+1:])
+		host, _, err := net.SplitHostPort(hostport)
+		if err != nil || host == "" {
+			return peerInfo{}
+		}
+		return peerInfo{
+			ID:       id,
+			RaftAddr: hostport,
+			HTTPAddr: net.JoinHostPort(host, "8080"),
+		}
+	}
+	// id@host:raft:http
 	parts := strings.SplitN(s, "@", 2)
 	if len(parts) != 2 {
 		return peerInfo{}
@@ -71,6 +90,8 @@ func parsePeer(s string) peerInfo {
 	}
 	if len(addrParts) >= 3 {
 		p.HTTPAddr = fmt.Sprintf("%s:%s", host, strings.TrimSpace(addrParts[2]))
+	} else {
+		p.HTTPAddr = net.JoinHostPort(host, "8080")
 	}
 	return p
 }

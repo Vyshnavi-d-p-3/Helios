@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/vyshnavi-d-p-3/helios/internal/cluster"
 	"github.com/vyshnavi-d-p-3/helios/internal/engine"
 	"github.com/vyshnavi-d-p-3/helios/internal/storage"
 )
@@ -26,6 +27,8 @@ type Handler struct {
 	Version string
 	Promql  *engineAdapter
 	Anomaly *AnomalyHandler
+	// Cluster enables leader forwarding on POST /api/v1/write and exposes /cluster/* when non-nil.
+	Cluster *cluster.Node
 	// Set by registerMetrics; optional for tests that bypass NewServeMux.
 	ingestSamplesCommitted prometheus.Counter
 	ingestRejected         *prometheus.CounterVec
@@ -57,8 +60,13 @@ func NewServeMux(h *Handler) *http.ServeMux {
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /-/healthy", h.probeHealthy)
 	mux.HandleFunc("GET /-/ready", h.probeReady)
+	mux.HandleFunc("GET /livez", h.livez)
 	mux.HandleFunc("GET /api/v1/status", h.status)
-	mux.HandleFunc("POST /api/v1/write", h.write)
+	writeFn := http.HandlerFunc(h.write)
+	if h.Cluster != nil {
+		writeFn = h.Cluster.LeaderForwardingHandler(h.write)
+	}
+	mux.HandleFunc("POST /api/v1/write", writeFn)
 	mux.HandleFunc("POST /api/v1/read", h.read)
 	mux.HandleFunc("POST /api/v1/flush", h.flush)
 	mux.HandleFunc("POST /api/v1/compact", h.compactL0)
@@ -69,7 +77,18 @@ func NewServeMux(h *Handler) *http.ServeMux {
 	if h.Anomaly != nil {
 		h.Anomaly.Register(mux)
 	}
+	if h.Cluster != nil {
+		mux.HandleFunc("GET /cluster/leader", h.Cluster.LeaderInfoHandler())
+		mux.HandleFunc("POST /cluster/join", h.Cluster.JoinHandler())
+	}
 	return mux
+}
+
+func (h *Handler) livez(w http.ResponseWriter, r *http.Request) {
+	_ = r
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "ok\n")
 }
 
 func (h *Handler) flush(w http.ResponseWriter, r *http.Request) {

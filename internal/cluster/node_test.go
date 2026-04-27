@@ -17,16 +17,24 @@ func TestParsePeer(t *testing.T) {
 
 func TestBuildPeerHTTPLookup(t *testing.T) {
 	cfg := Config{
+		Advertise:     "helios-1:7000",
+		HTTPAdvertise: "helios-1:9090",
 		Peers: []string{
-			"node1@helios-1:7000:8080",
 			"node2@helios-2:7000:8081",
 		},
 	}
 	m := buildPeerHTTPLookup(cfg)
-	if m["helios-1:7000"] != "helios-1:8080" {
-		t.Fatalf("missing helios-1 mapping: %#v", m)
+	if m["helios-1:7000"] != "helios-1:9090" {
+		t.Fatalf("missing self mapping: %#v", m)
 	}
 	if m["helios-2:7000"] != "helios-2:8081" {
 		t.Fatalf("missing helios-2 mapping: %#v", m)
+	}
+}
+
+func TestParsePeerEqualsForm(t *testing.T) {
+	p := parsePeer("helios-2=helios-2:7000")
+	if p.ID != "helios-2" || p.RaftAddr != "helios-2:7000" || p.HTTPAddr != "helios-2:8080" {
+		t.Fatalf("got %#v", p)
 	}
 }

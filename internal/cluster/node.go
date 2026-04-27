@@ -11,15 +11,20 @@ import (
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	"github.com/vyshnavi-d-p-3/helios/internal/engine"
+	"github.com/vyshnavi-d-p-3/helios/internal/storage"
 )
 
 type Config struct {
-	NodeID    string
+	NodeID string
+	// RaftDir holds raft log/stable/snapshot files. If empty, filepath.Join(DataDir,"raft") is used.
 	DataDir   string
+	RaftDir   string
 	BindAddr  string
 	Advertise string
-	Bootstrap bool
-	Peers     []string
+	// HTTPAdvertise is the host:port used to forward follower writes to the leader (must match peers' HTTP).
+	HTTPAdvertise string
+	Bootstrap     bool
+	Peers         []string
 
 	SnapshotInterval time.Duration
 	BatchSize        int
@@ -35,7 +40,10 @@ type Node struct {
 }
 
 func NewNode(cfg Config, eng *engine.Engine) (*Node, error) {
-	raftDir := filepath.Join(cfg.DataDir, "raft")
+	raftDir := cfg.RaftDir
+	if raftDir == "" {
+		raftDir = filepath.Join(cfg.DataDir, "raft")
+	}
 	if err := os.MkdirAll(raftDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -96,6 +104,15 @@ func (n *Node) Apply(payload []byte) error {
 	return n.bw.Submit(payload)
 }
 
+// Replicate encodes samples and submits them to Raft (leader only — callers should forward first).
+func (n *Node) Replicate(samples []storage.Sample) error {
+	payload, err := encodeBatch(samples)
+	if err != nil {
+		return err
+	}
+	return n.Apply(payload)
+}
+
 func (n *Node) Shutdown() error {
 	return n.raft.Shutdown().Error()
 }
@@ -113,13 +130,8 @@ func (n *Node) leaderHTTPAddr(raftAddr string) string {
 
 func buildPeerHTTPLookup(cfg Config) map[string]string {
 	m := map[string]string{}
-	// include self if peers omit it
-	if cfg.Advertise != "" && cfg.BindAddr != "" {
-		selfHost := strings.Split(cfg.Advertise, ":")[0]
-		httpPort := strings.TrimPrefix(cfg.BindAddr, ":")
-		if httpPort != "" {
-			m[cfg.Advertise] = fmt.Sprintf("%s:%s", selfHost, httpPort)
-		}
+	if cfg.Advertise != "" && cfg.HTTPAdvertise != "" {
+		m[cfg.Advertise] = cfg.HTTPAdvertise
 	}
 	for _, raw := range cfg.Peers {
 		p := parsePeer(strings.TrimSpace(raw))
