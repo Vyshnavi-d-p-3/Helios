@@ -96,9 +96,24 @@ func NewNode(cfg Config, eng *engine.Engine) (*Node, error) {
 	return n, nil
 }
 
-func (n *Node) IsLeader() bool { return n.raft.State() == raft.Leader }
-func (n *Node) Leader() string { return string(n.raft.Leader()) }
-func (n *Node) State() string  { return n.raft.State().String() }
+func (n *Node) IsLeader() bool {
+	if n == nil || n.raft == nil {
+		return false
+	}
+	return n.raft.State() == raft.Leader
+}
+func (n *Node) Leader() string {
+	if n == nil || n.raft == nil {
+		return ""
+	}
+	return string(n.raft.Leader())
+}
+func (n *Node) State() string {
+	if n == nil || n.raft == nil {
+		return "unknown"
+	}
+	return n.raft.State().String()
+}
 
 func (n *Node) Apply(payload []byte) error {
 	return n.bw.Submit(payload)
