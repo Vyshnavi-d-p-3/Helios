@@ -107,6 +107,8 @@ cd deployments
 docker compose up --build
 ```
 
+Quick checks (containers healthy): `chmod +x smoke_cluster.sh && ./smoke_cluster.sh` from `deployments/` (hits `/livez` and `/cluster/leader` on ports 8080–8082).
+
 Environment highlights: `HELIOS_RAFT_ADDR` (advertised host:port for Raft TCP), `HELIOS_PEERS` (comma-separated `id=host:raftport` or `id@host:raft:http`), `HELIOS_BOOTSTRAP=true` only on the seed node, `HELIOS_RAFT_DIR` for persistent Raft logs (separate from TSDB `HELIOS_DATA_DIR`). Writes to any node are forwarded to the Raft leader’s HTTP endpoint.
 
 ## Documents
