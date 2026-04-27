@@ -814,6 +814,34 @@ func TestAPI_probes(t *testing.T) {
 	}
 }
 
+func TestAPI_livez(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	eng, err := engine.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	h := &Handler{Eng: eng, Version: "t"}
+	srv := httptest.NewServer(NewServeMux(h))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/livez")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "ok\n" {
+		t.Fatalf("body %q", b)
+	}
+}
+
 func TestAPI_healthz(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DataDir = filepath.Join(t.TempDir(), "d")

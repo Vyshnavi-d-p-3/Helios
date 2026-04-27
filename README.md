@@ -114,7 +114,7 @@ Environment highlights: `HELIOS_RAFT_ADDR` (advertised host:port for Raft TCP), 
 - `CRITICAL_REVIEW.md`
 - `REVISED_PLAN.md`
 - `docs/LABEL_INDEX_DESIGN.md`
-- `docs/RAFT_BOOTSTRAP_FIX.md`
+- `RAFT_BOOTSTRAP_FIX.md` (bootstrap notes; ADR **`docs/adr/0005-raft-replication.md`** is canonical)
 - `docs/BRANCHING.md`
 - `docs/DEMO.md`
 - `docs/adr/`
