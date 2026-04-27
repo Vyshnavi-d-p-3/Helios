@@ -80,3 +80,13 @@ curl -sS localhost:8080/metrics | head -40
 SCALE=10 TARGET=http://127.0.0.1:8080/api/v1/write ./bench/tsbs/load_helios.sh
 go run ./bench/tsbs/cmd/query_benchmark -target http://127.0.0.1:8080 -queries 1000
 ```
+
+## 9) Multi-node (optional)
+
+Use Docker Compose from `deployments/` (see root **README** for env vars). After nodes are up, check leadership on any instance:
+
+```bash
+curl -sS http://127.0.0.1:8080/cluster/leader | jq
+```
+
+Writes to a follower are proxied to the leader’s HTTP API automatically.

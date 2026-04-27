@@ -24,22 +24,23 @@ var ErrTooManyFrozen = errors.New("engine: memtable flush queue saturated")
 
 // Engine coordinates durable append (WAL), memtable, and optional SSTs on disk.
 type Engine struct {
-	cfg   config.Config
-	mu    sync.Mutex
-	wal   *wal.WAL
-	mem   *memtable.Memtable // active memtable
+	cfg    config.Config
+	mu     sync.Mutex
+	wal    *wal.WAL
+	mem    *memtable.Memtable // active memtable
 	frozen []*memtable.Memtable
-	sst   []*sstable.Table
-	sstID int
+	sst    []*sstable.Table
+	sstID  int
 	// seriesCard maps metric name -> set of canonical series keys; used when
 	// MaxSeriesPerMetric > 0. Rebuilt on Open and after retention removes SSTs.
-	seriesCard map[string]map[string]struct{}
-	anomalyReg *anomaly.Registry
-	cache      *blockcache.Cache
-	flushCh    chan struct{}
-	stopCh     chan struct{}
-	flushWG    sync.WaitGroup
-	flushCond  *sync.Cond
+	seriesCard   map[string]map[string]struct{}
+	anomalyReg   *anomaly.Registry
+	cache        *blockcache.Cache
+	flushCh      chan struct{}
+	stopCh       chan struct{}
+	flushWG      sync.WaitGroup
+	flushCond    *sync.Cond
+	clusterApply func([]storage.Sample) error
 }
 
 // Open loads configuration paths, replays the WAL, opens the WAL for appends,
@@ -63,10 +64,10 @@ func Open(cfg config.Config) (*Engine, error) {
 		return nil, err
 	}
 	eng := &Engine{
-		cfg:   cfg,
-		wal:   w,
-		mem:   mem,
-		cache: blockcache.New(cfg.BlockCacheMaxSamples),
+		cfg:     cfg,
+		wal:     w,
+		mem:     mem,
+		cache:   blockcache.New(cfg.BlockCacheMaxSamples),
 		flushCh: make(chan struct{}, 1),
 		stopCh:  make(chan struct{}),
 	}
@@ -127,6 +128,9 @@ func (e *Engine) Write(samples []storage.Sample) error {
 	if err := e.cardinalityCheckBatchLocked(samples); err != nil {
 		return err
 	}
+	if e.clusterApply != nil {
+		return e.clusterApply(samples)
+	}
 	if _, err := e.wal.Append(samples); err != nil {
 		return err
 	}
@@ -139,6 +143,35 @@ func (e *Engine) Write(samples []storage.Sample) error {
 		}
 	}
 	return nil
+}
+
+// WriteDirect applies a batch to local durability/memtable without cluster forwarding.
+// Used by Raft FSM apply path on all nodes.
+func (e *Engine) WriteDirect(samples []storage.Sample) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, err := e.wal.Append(samples); err != nil {
+		return err
+	}
+	for i := range samples {
+		e.mem.Put(samples[i])
+		e.cardinalityRecordLocked(samples[i])
+		if e.anomalyReg != nil && !math.IsNaN(samples[i].Value) && !math.IsInf(samples[i].Value, 0) {
+			key := storage.SeriesKey(samples[i].Metric, samples[i].Labels)
+			e.anomalyReg.Process(samples[i].Metric, samples[i].Labels, key, samples[i].Timestamp, samples[i].Value)
+		}
+	}
+	return nil
+}
+
+// SetClusterApply wires leader replication apply callback into the write path.
+func (e *Engine) SetClusterApply(fn func([]storage.Sample) error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.clusterApply = fn
 }
 
 // AttachAnomalyRegistry wires optional anomaly detection into the write path.
