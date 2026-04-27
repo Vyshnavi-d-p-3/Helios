@@ -1,6 +1,6 @@
 # Helios
 
-Helios is a single-node time-series database written in Go.
+Helios is a time-series database written in Go (single-node by default; optional 3-node Raft replication).
 It implements WAL + memtable + SSTable storage, Gorilla compression, label-postings filtering,
 Prometheus-compatible write/read endpoints, a practical PromQL subset, and streaming EWMA anomaly detection.
 
@@ -18,7 +18,8 @@ The goal is for every claim in this README to map to concrete code and repeatabl
 - **Read path**: query by exact label filters, matcher selectors, and PromQL subset.
 - **Retention**: configurable age-based SST cleanup, plus manual retention endpoint.
 - **Anomaly path**: EWMA detector registry + SSE stream for high-zscore events.
-- **Observability**: `/metrics`, health/readiness probes, and status endpoint.
+- **Optional clustering**: hashicorp Raft with leader forwarding on `POST /api/v1/write`, SST-backed FSM snapshots, and Bolt-backed Raft logs (enable with `-peers` and/or `-bootstrap`).
+- **Observability**: `/metrics`, health/readiness probes, `/livez`, and status endpoint.
 
 ## Performance
 
@@ -66,6 +67,11 @@ Metadata + ops:
 - `GET /metrics`
 - `GET /-/healthy`
 - `GET /-/ready`
+- `GET /livez` (process up; suitable for minimal container healthchecks)
+
+Cluster (only when `-bootstrap` and/or `-peers` is set):
+- `GET /cluster/leader` — Raft leader id and role
+- `POST /cluster/join` — leader-only; JSON `{"id","address"}` to add a voter at runtime
 
 Anomaly detection:
 - `GET /api/v1/anomalies` (SSE stream)
@@ -81,7 +87,7 @@ Implemented subset includes:
 
 ## What is intentionally out of scope
 
-- Multi-node replication and Raft consensus.
+- Sharded multi-tenant clusters beyond a single Raft group.
 - Full PromQL language compliance.
 - Production auth/TLS and tenant isolation.
 
@@ -92,12 +98,25 @@ go build ./cmd/helios
 ./helios -data-dir ./data -http-addr :8080
 ```
 
+### Optional: 3-node Raft (Docker Compose)
+
+From `deployments/` (needs a one-time `docker compose build`):
+
+```bash
+cd deployments
+docker compose up --build
+```
+
+Quick checks (containers healthy): `chmod +x smoke_cluster.sh && ./smoke_cluster.sh` from `deployments/` (hits `/livez` and `/cluster/leader` on ports 8080–8082).
+
+Environment highlights: `HELIOS_RAFT_ADDR` (advertised host:port for Raft TCP), `HELIOS_PEERS` (comma-separated `id=host:raftport` or `id@host:raft:http`), `HELIOS_BOOTSTRAP=true` only on the seed node, `HELIOS_RAFT_DIR` for persistent Raft logs (separate from TSDB `HELIOS_DATA_DIR`). Writes to any node are forwarded to the Raft leader’s HTTP endpoint.
+
 ## Documents
 
 - `CRITICAL_REVIEW.md`
 - `REVISED_PLAN.md`
 - `docs/LABEL_INDEX_DESIGN.md`
-- `docs/RAFT_BOOTSTRAP_FIX.md`
+- `RAFT_BOOTSTRAP_FIX.md` (bootstrap notes; ADR **`docs/adr/0005-raft-replication.md`** is canonical)
 - `docs/BRANCHING.md`
 - `docs/DEMO.md`
 - `docs/adr/`

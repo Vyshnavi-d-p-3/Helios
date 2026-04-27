@@ -15,8 +15,10 @@ import (
 
 	"github.com/vyshnavi-d-p-3/helios/internal/anomaly"
 	"github.com/vyshnavi-d-p-3/helios/internal/api"
+	"github.com/vyshnavi-d-p-3/helios/internal/cluster"
 	"github.com/vyshnavi-d-p-3/helios/internal/config"
 	"github.com/vyshnavi-d-p-3/helios/internal/engine"
+	"github.com/vyshnavi-d-p-3/helios/internal/storage"
 )
 
 // withPprof serves net/http/pprof (heap, profile, etc.) and delegates other paths
@@ -97,6 +99,45 @@ func main() {
 	}
 	defer eng.Close()
 
+	var cnode *cluster.Node
+	if cfg.Bootstrap || len(cfg.Peers) > 0 {
+		raftBind, raftAdvertise, err := cluster.RaftBindAdvertise(cfg.RaftAddr)
+		if err != nil {
+			log.Fatalf("raft addr: %v", err)
+		}
+		httpAdv, err := cluster.HTTPAdvertise(cfg.HTTPAddr, raftAdvertise)
+		if err != nil {
+			log.Fatalf("cluster http advertise: %v", err)
+		}
+		cn, err := cluster.NewNode(cluster.Config{
+			NodeID:           cfg.NodeID,
+			DataDir:          cfg.DataDir,
+			RaftDir:          cfg.RaftDataDir,
+			BindAddr:         raftBind,
+			Advertise:        raftAdvertise,
+			HTTPAdvertise:    httpAdv,
+			Bootstrap:        cfg.Bootstrap,
+			Peers:            cfg.Peers,
+			SnapshotInterval: 2 * time.Minute,
+		}, eng)
+		if err != nil {
+			log.Fatalf("cluster: %v", err)
+		}
+		cnode = cn
+		eng.SetClusterApply(func(samples []storage.Sample) error {
+			return cnode.Replicate(samples)
+		})
+		log.Printf("cluster: raft advertise=%s http advertise=%s bootstrap=%v peers=%d",
+			raftAdvertise, httpAdv, cfg.Bootstrap, len(cfg.Peers))
+	}
+	defer func() {
+		if cnode != nil {
+			if err := cnode.Shutdown(); err != nil {
+				log.Printf("cluster shutdown: %v", err)
+			}
+		}
+	}()
+
 	runCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 	if cfg.RetentionPeriod > 0 && cfg.RetentionGCTickInterval > 0 {
@@ -107,7 +148,7 @@ func main() {
 		go runRetentionInitialDelay(runCtx, eng)
 	}
 
-	h := &api.Handler{Eng: eng, Version: Version}
+	h := &api.Handler{Eng: eng, Version: Version, Cluster: cnode}
 	if cfg.AnomalyEnabled {
 		reg := anomaly.NewRegistry(anomaly.RegistryConfig{
 			Alpha:      cfg.AnomalyAlpha,
@@ -164,7 +205,11 @@ func main() {
 	if cfg.Pprof {
 		pprofLine = "pprof: GET /debug/pprof/ (local/trusted use)"
 	}
-	log.Printf("probes: GET /-/healthy /-/ready  %s  read: GET /api/v1/query /api/v1/query_range  write: POST /api/v1/write  flush: POST /api/v1/flush  compact: POST /api/v1/compact  retention: POST /api/v1/retention  GET /metrics  data_dir=%s", pprofLine, cfg.DataDir)
+	clusterLine := ""
+	if cnode != nil {
+		clusterLine = "  cluster: GET /cluster/leader POST /cluster/join"
+	}
+	log.Printf("probes: GET /-/healthy /-/ready GET /livez  %s  read: GET /api/v1/query /api/v1/query_range  write: POST /api/v1/write (leader-forwarded when clustered)%s  flush: POST /api/v1/flush  compact: POST /api/v1/compact  retention: POST /api/v1/retention  GET /metrics  data_dir=%s", pprofLine, clusterLine, cfg.DataDir)
 	fmt.Fprintln(os.Stdout, "Helios: Ctrl+C to stop.")
 
 	sig := make(chan os.Signal, 1)

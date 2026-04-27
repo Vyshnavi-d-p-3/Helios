@@ -61,7 +61,7 @@ demo could ship here — replication is "stretch."
 
 ### Weeks 5-6: Replication via Raft (40 h)
 - Raft FSM as a BatchingFSM wrapping Engine.Write (2 days)
-- RaftNode with full-config bootstrap (see RAFT_BOOTSTRAP_FIX.md) (2 days)
+- RaftNode with full-config bootstrap (see `docs/adr/0005-raft-replication.md`) (2 days)
 - Coordinator: write to leader, forward if not leader (1 day)
 - Snapshot via SSTable hardlinks (2 days)
 - Docker Compose 3-node cluster (1 day)

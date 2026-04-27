@@ -32,7 +32,9 @@ type Config struct {
 	ShardCount int
 	Bootstrap  bool
 
-	DataDir         string
+	DataDir string
+	// RaftDataDir is the directory for Raft log/snap stores. Empty means <data-dir>/raft.
+	RaftDataDir     string
 	MemtableMaxSize int64
 	WALSyncMode     string
 	WALSyncInterval time.Duration
@@ -63,14 +65,14 @@ type Config struct {
 	// disables the cap (not recommended for public endpoints).
 	MaxQueryWindow time.Duration
 
-	AnomalyEnabled   bool
-	AnomalyAlpha     float64
-	AnomalyThreshold float64
-	AnomalyWarmup    int
-	AnomalyMaxSeries int
-	AnomalyStaleAfter time.Duration
+	AnomalyEnabled       bool
+	AnomalyAlpha         float64
+	AnomalyThreshold     float64
+	AnomalyWarmup        int
+	AnomalyMaxSeries     int
+	AnomalyStaleAfter    time.Duration
 	BlockCacheMaxSamples int
-	MaxFrozenMemtables int
+	MaxFrozenMemtables   int
 
 	LogLevel string
 }
@@ -133,6 +135,7 @@ func ParseArgs(fs *flag.FlagSet, args []string) (Config, error) {
 	fs.IntVar(&cfg.ShardCount, "shard-count", cfg.ShardCount, "Number of shards (1 = single-shard, replicated)")
 	fs.BoolVar(&cfg.Bootstrap, "bootstrap", cfg.Bootstrap, "Bootstrap a new Raft cluster")
 	fs.StringVar(&cfg.DataDir, "data-dir", cfg.DataDir, "Data directory")
+	fs.StringVar(&cfg.RaftDataDir, "raft-data-dir", cfg.RaftDataDir, "Raft log/store directory; empty uses <data-dir>/raft")
 	fs.Int64Var(&cfg.MemtableMaxSize, "memtable-max-size", cfg.MemtableMaxSize, "Max memtable size in bytes")
 	fs.StringVar(&cfg.WALSyncMode, "wal-sync-mode", cfg.WALSyncMode, "WAL sync mode: immediate|batch")
 	fs.DurationVar(&cfg.WALSyncInterval, "wal-sync-interval", cfg.WALSyncInterval, "Batch sync interval")
@@ -185,6 +188,7 @@ func (c *Config) applyEnv() {
 	getEnv("HELIOS_GRPC_ADDR", func(v string) { c.GRPCAddr = v })
 	getEnv("HELIOS_RAFT_ADDR", func(v string) { c.RaftAddr = v })
 	getEnv("HELIOS_DATA_DIR", func(v string) { c.DataDir = v })
+	getEnv("HELIOS_RAFT_DIR", func(v string) { c.RaftDataDir = v })
 	getEnv("HELIOS_LOG_LEVEL", func(v string) { c.LogLevel = v })
 	getEnv("HELIOS_PEERS", func(v string) { c.Peers = splitCSV(v) })
 	if v, ok := os.LookupEnv("HELIOS_PPROF"); ok {
@@ -293,9 +297,6 @@ func (c Config) Validate() error {
 	}
 	if c.MaxFrozenMemtables <= 0 {
 		return fmt.Errorf("max-frozen-memtables must be > 0, got %d", c.MaxFrozenMemtables)
-	}
-	if c.Bootstrap && len(c.Peers) == 0 {
-		return fmt.Errorf("bootstrap=true requires at least one peer (the node itself)")
 	}
 	return nil
 }

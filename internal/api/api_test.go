@@ -319,7 +319,10 @@ func TestAPI_write_and_status(t *testing.T) {
 		t.Fatalf("write status %d", resp.StatusCode)
 	}
 
-	r2, _ := http.Get(srv.URL + "/api/v1/status")
+	r2, err := http.Get(srv.URL + "/api/v1/status")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer r2.Body.Close()
 	var st map[string]interface{}
 	_ = json.NewDecoder(r2.Body).Decode(&st)
@@ -808,6 +811,34 @@ func TestAPI_probes(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("%s: %d", path, resp.StatusCode)
 		}
+	}
+}
+
+func TestAPI_livez(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	eng, err := engine.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	h := &Handler{Eng: eng, Version: "t"}
+	srv := httptest.NewServer(NewServeMux(h))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/livez")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "ok\n" {
+		t.Fatalf("body %q", b)
 	}
 }
 
